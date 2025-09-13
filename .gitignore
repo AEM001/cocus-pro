@@ -1,0 +1,40 @@
+# 忽略大文件目录
+checkpoints/
+models/
+
+# 忽略Python缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 忽略IDE配置文件
+.claude/
+.DS_Store
+.vscode/
+.idea/
+
+# 忽略输出目录
+auxiliary/out/
+auxiliary/box_out/
+auxiliary/llm_out/
+examples/output/
