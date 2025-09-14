@@ -1,0 +1,10 @@
+{
+  "missing_parts": [],
+  "over_segments": [],
+  "boundary_quality": "soft",
+  "key_cues": [
+    "overall shape",
+    "texture",
+    "edges"
+  ]
+}
