@@ -22,7 +22,7 @@ def main():
         epilog="""
 使用示例:
   # 运行完整流程
-  cv-segment --config config.yaml --name scorpionfish --text "scorpionfish"
+  cv-segment --name scorpionfish --text "scorpionfish"
   
   # 仅运行区域提示生成
   cv-segment --stage region_prompts --name scorpionfish
@@ -33,8 +33,8 @@ def main():
     )
     
     # 基本参数
-    parser.add_argument("--config", type=str, default="auxiliary/docs/config.yaml",
-                       help="配置文件路径")
+    parser.add_argument("--config", type=str, default=None,
+                       help="可选：配置文件路径（若不提供，则使用内置默认路径推断）")
     parser.add_argument("--name", type=str, required=True,
                        help="图像名称 (不含扩展名)")
     parser.add_argument("--text", type=str,
@@ -73,9 +73,6 @@ def main():
     
     args = parser.parse_args()
     
-    # 加载配置
-    config = load_config(args.config)
-    
     # 创建输出目录
     output_dir = Path(args.output_dir) / args.name
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -86,11 +83,11 @@ def main():
     try:
         if args.stage in ["all", "region_prompts"]:
             print("\n📊 步骤 1: 生成区域提示图")
-            run_region_prompts(args, config)
+            run_region_prompts(args)
         
         if args.stage in ["all", "build_prior"]:
             print("\n🎯 步骤 2: 构建初始边界框和掩码")  
-            run_build_prior(args, config)
+            run_build_prior(args)
         
         if args.stage in ["all", "sculpt"]:
             if not args.text:
@@ -98,7 +95,7 @@ def main():
                 return
                 
             print(f"\n🎨 步骤 3: 语义引导精细雕刻 (目标: {args.text})")
-            run_sculpting(args, config, output_dir)
+            run_sculpting(args, output_dir)
         
         print(f"\n✅ 处理完成! 结果保存在: {output_dir}")
         
@@ -115,26 +112,29 @@ def main():
         sys.exit(1)
 
 
-def load_config(config_path: str) -> Dict[str, Any]:
-    """加载YAML配置文件"""
-    if not os.path.exists(config_path):
-        print(f"⚠️  配置文件不存在: {config_path}")
+def load_config(config_path: Optional[str]) -> Dict[str, Any]:
+    """（保留作为兼容）可选加载配置；若未提供或不存在则返回空字典"""
+    if not config_path:
         return {}
-    
+    if not os.path.exists(config_path):
+        print(f"⚠️  配置文件不存在: {config_path}，将使用内置默认路径")
+        return {}
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f) or {}
 
 
-def run_region_prompts(args, config):
+def run_region_prompts(args):
     """运行区域提示生成"""
     try:
         from auxiliary.scripts.make_region_prompts import main as make_prompts
         
         # 准备参数
+        # 无需外部配置：按约定从 auxiliary/images/{name}.png 读取
+        img_path = f"auxiliary/images/{args.name}.png"
         sys.argv = [
             "make_region_prompts.py",
-            "--config", args.config,
-            "--name", args.name
+            "--name", args.name,
+            "--image", img_path,
         ]
         
         make_prompts()
@@ -146,16 +146,18 @@ def run_region_prompts(args, config):
         print(f"   ❌ 区域提示生成失败: {e}")
 
 
-def run_build_prior(args, config):
+def run_build_prior(args):
     """运行初始边界框和掩码构建"""
     try:
         from auxiliary.scripts.build_prior_and_boxes import main as build_prior
         
         # 准备参数
+        # 无需外部配置：按约定从 auxiliary/images/{name}.png 读取
+        img_path = f"auxiliary/images/{args.name}.png"
         sys.argv = [
             "build_prior_and_boxes.py",
-            "--config", args.config, 
-            "--name", args.name
+            "--name", args.name,
+            "--image", img_path,
         ]
         
         build_prior()
@@ -167,22 +169,26 @@ def run_build_prior(args, config):
         print(f"   ❌ 边界框构建失败: {e}")
 
 
-def run_sculpting(args, config, output_dir: Path):
+def run_sculpting(args, output_dir: Path):
     """运行语义引导精细雕刻"""
     try:
         from cog_sculpt.cli import main as sculpt_main
         from cog_sculpt.cli import build_cfg_from_yaml_and_args
         
         # 构造sculpting参数
+        # 直接在此处按 name 推断默认路径，避免外部配置依赖
+        img_path = f"auxiliary/images/{args.name}.png"
+        boxes_path = f"auxiliary/box_out/{args.name}/{args.name}_sam_boxes.json"
+        prior_path = f"auxiliary/box_out/{args.name}/{args.name}_prior_mask.png"
         sculpt_args = argparse.Namespace(
-            config=args.config,
+            config=None,
             name=args.name,
             text=args.text,
-            image=None,  # 由配置文件确定
+            image=img_path,
             meta=None,
-            boxes=None,
-            prior_mask=None,
-            out_root=str(output_dir.parent),
+            boxes=boxes_path,
+            prior_mask=prior_path,
+            out_root=str(output_dir),
             grid=args.grid_size,
             k=args.iterations,
             margin=None,
@@ -199,8 +205,12 @@ def run_sculpting(args, config, output_dir: Path):
         if not cfg.image_path or not os.path.exists(cfg.image_path):
             print(f"   ❌ 图像文件不存在: {cfg.image_path}")
             return
-            
         print(f"   📸 图像: {cfg.image_path}")
+        if cfg.boxes_json_path and os.path.exists(cfg.boxes_json_path):
+            print(f"   📦 boxes: {cfg.boxes_json_path}")
+        if cfg.prior_mask_path and os.path.exists(cfg.prior_mask_path):
+            print(f"   🧩 prior: {cfg.prior_mask_path}")
+        
         print(f"   🎯 目标: {args.text}")
         print(f"   📐 网格: {args.grid_size}")
         print(f"   🔄 迭代: {args.iterations}轮")
@@ -218,9 +228,14 @@ def run_sculpting(args, config, output_dir: Path):
 def generate_visualization(args, output_dir: Path):
     """生成可视化结果"""
     try:
-        # 寻找结果文件
-        final_mask_path = output_dir / args.name / "final_mask.png"
-        final_overlay_path = output_dir / args.name / "final_overlay.png"
+        # 寻找结果文件（兼容两种保存位置）
+        flat_mask = output_dir / "final_mask.png"
+        flat_overlay = output_dir / "final_overlay.png"
+        nested_dir = output_dir / (args.name or "scene")
+        nested_mask = nested_dir / "final_mask.png"
+        nested_overlay = nested_dir / "final_overlay.png"
+        final_mask_path = flat_mask if flat_mask.exists() else nested_mask
+        final_overlay_path = flat_overlay if flat_overlay.exists() else nested_overlay
         
         if final_mask_path.exists():
             print(f"   📄 最终掩码: {final_mask_path}")
@@ -228,7 +243,7 @@ def generate_visualization(args, output_dir: Path):
             print(f"   🖼️  叠加可视化: {final_overlay_path}")
         
         # 如果有调试信息，列出调试文件
-        debug_dir = output_dir / args.name
+        debug_dir = output_dir if (output_dir / "iter_00_debug.json").exists() else nested_dir
         if debug_dir.exists():
             debug_files = list(debug_dir.glob("iter_*_debug.json"))
             if debug_files:
