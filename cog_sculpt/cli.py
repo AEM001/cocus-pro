@@ -209,10 +209,9 @@ def main():
             }
             with open(os.path.join(out_dir, f"iter_{it:02d}_debug.json"), "w", encoding="utf-8") as f:
                 _json.dump(points_dump, f, ensure_ascii=False, indent=2)
-            # 保存叠加图
+            # 保存每轮掩码与叠加图
             if mask is not None:
-                from .io import save_mask_png as _save_mask_png
-                _save_mask_png(mask, os.path.join(out_dir, f"iter_{it:02d}_mask.png"))
+                save_mask_png(mask, os.path.join(out_dir, f"iter_{it:02d}_mask.png"))
                 save_image(overlay(image, mask), os.path.join(out_dir, f"iter_{it:02d}_overlay.png"))
 
         debug_hook = _hook
