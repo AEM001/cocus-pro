@@ -1,5 +1,3 @@
-为全面列出“可直接运行的命令”，我会先快速查看与运行相关的脚本文件，确保给出的命令都能实际执行：例如 `examples/simple_example.py`、[debug_alpha_clip.py](cci:7://file:///Users/Mac/code/cocus-pro/Users/Mac/code/cocus-pro/debug_alpha_clip.py:0:0-0:0) 等。这样可以覆盖 pipeline、辅助脚本和示例脚本的调用方式。随后我会汇总成清单。
-
 下面给你一份“可直接运行的命令清单”，按模块和文件划分，并结合本仓库当前实现与默认路径约定。所有命令都以项目根目录为工作目录执行：`/Users/Mac/code/cocus-pro/`
 
 先决条件

@@ -27,12 +27,12 @@ make_region_prompts.py
 import argparse
 import json
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Any
 
 from PIL import Image, ImageDraw, ImageFont
 
 
-def load_font(font_path: str | None, font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def load_font(font_path: Optional[str], font_size: int) -> Any:
     """优先加载指定 TTF/ TTC；未提供时在 macOS 常见系统字体中选可用的。
     若均不可用，再退回 Pillow 的位图字体（不可缩放）。
     """
