@@ -40,6 +40,36 @@ conda run -n camo-vlm python auxiliary/scripts/build_prior_and_boxes.py --name {
 conda run -n camo-vlm python -m cog_sculpt.cli --name {name}
 ```
 
+可选参数（除名称之外）
+- --k <int>：迭代轮数（默认 3）
+- --max-points <int>：每轮最大点数（默认 12）
+- --samples <int>：每轮边界采样点数（默认 24）
+- --band-out <int>：向外探索带宽（像素，默认 10）
+- --band-in <int>：向内探索带宽（像素，默认 6）
+- --radius-out <int>：外侧评分圆盘半径（像素，默认 8）
+- --radius-in <int>：内侧评分圆盘半径（像素，默认 8）
+- --pos-neg-ratio <float>：正负点数量比例（默认 2.0）
+- --iou-eps <float>：早停阈值（默认 5e-3，对应 IoU 变化 < 0.5%）
+
+语义模式与边缘模式
+- 语义模式（默认）：使用 Alpha-CLIP 语义评分（需要权重）
+  ```bash
+  conda run -n camo-vlm python -m cog_sculpt.cli --name {name}
+  ```
+- 边缘模式（无需权重）：使用多源边缘融合 + 法线探索
+  ```bash
+  COG_SCULPT_POINT_MODE=edge conda run -n camo-vlm python -m cog_sculpt.cli --name {name}
+  ```
+
+示例：
+```bash
+# 增大外侧探索与评分半径，更多正点；收窄内侧探索
+COG_SCULPT_POINT_MODE=edge conda run -n camo-vlm python -m cog_sculpt.cli \
+  --name f --k 7 --max-points 16 \
+  --samples 48 --band-out 16 --radius-out 12 \
+  --band-in 6 --radius-in 6 --pos-neg-ratio 2.5 --iou-eps 0.003
+```
+
 ## 参数说明
 
 ### 语义雕刻阶段关键参数

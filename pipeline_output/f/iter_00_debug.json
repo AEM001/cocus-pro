@@ -51,28 +51,28 @@
   ],
   "neg_points": [
     {
-      "y": 550,
-      "x": 670,
+      "y": 420,
+      "x": 520,
       "is_positive": false,
-      "score": -0.0166015625
+      "score": -0.0133056640625
     },
     {
       "y": 589,
       "x": 718,
       "is_positive": false,
-      "score": -0.013427734375
-    },
-    {
-      "y": 582,
-      "x": 694,
-      "is_positive": false,
-      "score": -0.0130615234375
+      "score": -0.0133056640625
     },
     {
       "y": 480,
       "x": 889,
       "is_positive": false,
-      "score": -0.012939453125
+      "score": -0.011962890625
+    },
+    {
+      "y": 544,
+      "x": 875,
+      "is_positive": false,
+      "score": -0.011474609375
     }
   ],
   "cells": []

@@ -1,0 +1,79 @@
+{
+  "pos_points": [
+    {
+      "y": 407,
+      "x": 744,
+      "is_positive": true,
+      "score": 0.0015869140625
+    },
+    {
+      "y": 496,
+      "x": 490,
+      "is_positive": true,
+      "score": 0.00048828125
+    },
+    {
+      "y": 532,
+      "x": 585,
+      "is_positive": true,
+      "score": 0.000244140625
+    },
+    {
+      "y": 403,
+      "x": 698,
+      "is_positive": true,
+      "score": -0.0003662109375
+    },
+    {
+      "y": 419,
+      "x": 550,
+      "is_positive": true,
+      "score": -0.001708984375
+    },
+    {
+      "y": 519,
+      "x": 554,
+      "is_positive": true,
+      "score": -0.0029296875
+    },
+    {
+      "y": 506,
+      "x": 528,
+      "is_positive": true,
+      "score": -0.00341796875
+    },
+    {
+      "y": 540,
+      "x": 626,
+      "is_positive": true,
+      "score": -0.00341796875
+    }
+  ],
+  "neg_points": [
+    {
+      "y": 578,
+      "x": 797,
+      "is_positive": false,
+      "score": -0.0123291015625
+    },
+    {
+      "y": 588,
+      "x": 715,
+      "is_positive": false,
+      "score": -0.011962890625
+    },
+    {
+      "y": 468,
+      "x": 875,
+      "is_positive": false,
+      "score": -0.010986328125
+    },
+    {
+      "y": 426,
+      "x": 515,
+      "is_positive": false,
+      "score": -0.01025390625
+    }
+  ],
+  "cells": []
+}

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, Callable
 
 import numpy as np
 from PIL import Image
+import cv2
 
 
 # ============================
@@ -77,6 +78,9 @@ class Config:
 
     use_prior_mask_as_M0: bool = True
     use_boxes_for_roi: bool = True
+
+    # 点生成策略：semantic (Alpha-CLIP) | edge (边缘感知) | hybrid (预留)
+    point_mode: str = "semantic"
 
 
 @dataclass
@@ -402,6 +406,79 @@ class DensityScorer(RegionScorer):
         return s / area
 
 
+class EdgeAwareScorer(RegionScorer):
+    """边缘感知评分器：使用多源边缘融合衡量候选区域的“边缘吻合度”。"""
+    def __init__(self, image_rgb: np.ndarray) -> None:
+        self.image = image_rgb
+        self.edges = self._compute_multi_source_edges(image_rgb)
+
+    @staticmethod
+    def _compute_multi_source_edges(image_rgb: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+        H, W = gray.shape
+        # 1) Canny
+        canny = cv2.Canny(gray, 50, 150).astype(np.float32)
+        # 2) Sobel 强度
+        sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        sobel_mag = cv2.magnitude(sobelx, sobely)
+        if (sobel_mag.max() or 0) > 0:
+            sobel_mag = sobel_mag / (sobel_mag.max() + 1e-6) * 255.0
+        # 3) Lab 颜色边缘
+        lab = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2LAB)
+        lab_edges = np.zeros_like(gray, dtype=np.float32)
+        for i in range(3):
+            gx = cv2.Sobel(lab[:, :, i], cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(lab[:, :, i], cv2.CV_32F, 0, 1, ksize=3)
+            gm = cv2.magnitude(gx, gy)
+            if (gm.max() or 0) > 0:
+                gm = gm / (gm.max() + 1e-6) * 255.0
+            lab_edges += gm
+        if (lab_edges.max() or 0) > 0:
+            lab_edges = lab_edges / (lab_edges.max() + 1e-6) * 255.0
+        # 融合
+        combined = 0.4 * canny + 0.4 * sobel_mag + 0.2 * lab_edges
+        return combined.astype(np.uint8)
+
+    def score(self, image: np.ndarray, alpha01: np.ndarray, text: str = "") -> float:
+        # 边缘密度
+        a = (alpha01 > 0).astype(np.float32)
+        denom = float(a.sum()) + 1e-6
+        edge_density = float((self.edges.astype(np.float32) * a).sum() / denom)
+        # 边缘连续性：在候选区域边界上统计边缘连通度
+        boundary = self._get_boundary_mask(a)
+        continuity = self._edge_continuity(boundary)
+        # 归一化维持同一量纲（粗略缩放）
+        ed_norm = edge_density / 255.0
+        return 0.7 * ed_norm + 0.3 * continuity
+
+    @staticmethod
+    def _get_boundary_mask(alpha01: np.ndarray) -> np.ndarray:
+        kernel = np.ones((3, 3), np.uint8)
+        dilated = cv2.dilate(alpha01.astype(np.uint8), kernel, iterations=1)
+        eroded = cv2.erode(alpha01.astype(np.uint8), kernel, iterations=1)
+        boundary = (dilated - eroded) > 0
+        return boundary.astype(np.uint8)
+
+    def _edge_continuity(self, boundary01: np.ndarray) -> float:
+        if boundary01.sum() == 0:
+            return 0.0
+        boundary_edges = ((self.edges > 0).astype(np.uint8) & (boundary01 > 0).astype(np.uint8)).astype(np.uint8)
+        edge_pixels = int(boundary_edges.sum())
+        if edge_pixels == 0:
+            return 0.0
+        # 连通域比例（最大连通块像素占所有边缘像素的比例）
+        num_labels, labels = cv2.connectedComponents(boundary_edges)
+        largest = 0
+        for i in range(1, num_labels):
+            size = int((labels == i).sum())
+            if size > largest:
+                largest = size
+        edge_ratio = edge_pixels / float(boundary01.sum() + 1e-6)
+        connectivity = largest / float(edge_pixels + 1e-6)
+        return float(0.6 * edge_ratio + 0.4 * connectivity)
+
+
 # ============================
 # Points
 # ============================
@@ -561,6 +638,99 @@ def make_boundary_semantic_points(
 
     return pos_pts, neg_pts
 
+
+
+def compute_edge_directions(edge_map: np.ndarray) -> np.ndarray:
+    edge_float = edge_map.astype(np.float32)
+    gx = cv2.Sobel(edge_float, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(edge_float, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(gx * gx + gy * gy) + 1e-6
+    dx = gx / mag
+    dy = gy / mag
+    dirs = np.stack([dy, dx], axis=-1)  # (y,x) 方向
+    return dirs
+
+
+def _explore_along_direction(mask01: np.ndarray, y: int, x: int, direction: Tuple[float, float], max_distance: int, limit_box: Box, target_val: int) -> Optional[Tuple[int, int]]:
+    """沿给定方向探索最近的目标像素（target_val ∈ {0,1}）。"""
+    H, W = mask01.shape
+    for step in range(1, max_distance + 1):
+        ny = int(round(y + step * direction[0]))
+        nx = int(round(x + step * direction[1]))
+        if ny < limit_box.r0 or ny >= limit_box.r1 or nx < limit_box.c0 or nx >= limit_box.c1:
+            continue
+        if mask01[ny, nx] == target_val:
+            return (ny, nx)
+    return None
+
+
+def make_edge_guided_points(
+    image: np.ndarray,
+    M: np.ndarray,
+    allowed_mask: np.ndarray,
+    allowed_box: Box,
+    scorer: EdgeAwareScorer,
+    max_total: int,
+    pos_neg_ratio: float,
+    band_out: int,
+    band_in: int,
+    r_out: int,
+    r_in: int,
+    n_samples: int,
+) -> Tuple[List[Point], List[Point]]:
+    """边缘引导的正负点生成：
+    - 正点（扩张）：沿边界法线外侧方向，寻最近背景像素并评分，取高分前K
+    - 负点（收缩）：沿边界法线内侧方向，寻最近前景像素并评分，取低分前K
+    """
+    H, W = M.shape
+    samples = _sample_boundary_points(M, allowed_box, n_samples=n_samples)
+    if not samples:
+        return [], []
+    dirs = compute_edge_directions(scorer.edges)
+    pos_candidates: List[Tuple[float, Tuple[int, int]]] = []
+    neg_candidates: List[Tuple[float, Tuple[int, int]]] = []
+
+    for (y, x) in samples:
+        # 边缘方向可能为零向量，做兜底
+        dy, dx = dirs[y, x]
+        if abs(dy) + abs(dx) < 1e-6:
+            # 默认采用垂直向外/向内两个方向
+            normals = [(0.0, 1.0), (0.0, -1.0)]
+        else:
+            # 法线方向（旋转90度）
+            normals = [(-dx, dy), (dx, -dy)]
+        # 选择一组法线来尝试（取成功的第一个）
+        found_out = None
+        found_in = None
+        for nd in normals:
+            if found_out is None:
+                found_out = _explore_along_direction(M, y, x, nd, band_out, allowed_box, target_val=0)
+            if found_in is None:
+                found_in = _explore_along_direction(M, y, x, (-nd[0], -nd[1]), band_in, allowed_box, target_val=1)
+            if found_out is not None and found_in is not None:
+                break
+        if found_out is not None:
+            oy, ox = found_out
+            alpha_out = _disk_mask(H, W, oy, ox, r_out)
+            alpha_out = (alpha_out & allowed_mask).astype(np.uint8)
+            if alpha_out.sum() > 0:
+                s_out = float(scorer.score(image, alpha_out, ""))
+                pos_candidates.append((s_out, (oy, ox)))
+        if found_in is not None:
+            iy, ix = found_in
+            alpha_in = _disk_mask(H, W, iy, ix, r_in)
+            alpha_in = (alpha_in & allowed_mask).astype(np.uint8)
+            if alpha_in.sum() > 0:
+                s_in = float(scorer.score(image, alpha_in, ""))
+                neg_candidates.append((s_in, (iy, ix)))
+
+    max_pos = int(max_total * pos_neg_ratio / (1.0 + pos_neg_ratio))
+    max_neg = max_total - max_pos
+    pos_candidates.sort(key=lambda t: t[0], reverse=True)
+    neg_candidates.sort(key=lambda t: t[0])
+    pos_pts = [Point(y, x, True, score=float(s)) for s, (y, x) in pos_candidates[:max_pos]]
+    neg_pts = [Point(y, x, False, score=float(s)) for s, (y, x) in neg_candidates[:max_neg]]
+    return pos_pts, neg_pts
 
 
 
@@ -765,24 +935,51 @@ def sculpting_pipeline(
     prior01 = (initial_mask_M0 > 0).astype(np.uint8)
     M = (M0_sam & prior01).astype(np.uint8)
 
+    # 计算允许域（使用 prior 的紧致外接框）
+    H, W = image.shape[:2]
+    _tight = bbox_from_mask(prior01)
+    allowed_box = bbox
+    if _tight is not None:
+        x1, y1, x2, y2 = _tight
+        allowed_box = box_from_xyxy_clip(y1, x1, y2, x2, H, W)
+
     # 在 prior 区域内进行迭代（无需额外扩张）
     for it in range(cfg.k_iters):
-        # 在边界带生成语义驱动的正负点
-        Ppos, Pneg = make_boundary_semantic_points(
-            image,
-            M,
-            prior01,  # 使用 prior 作为允许域
-            bbox,
-            scorer,
-            instance_text,
-            max_total=cfg.max_points_per_iter,
-            pos_neg_ratio=cfg.pos_neg_ratio,
-            band_out=cfg.boundary_band,
-            band_in=cfg.boundary_inner_band,
-            r_out=cfg.boundary_alpha_radius_out,
-            r_in=cfg.boundary_alpha_radius_in,
-            n_samples=cfg.boundary_samples,
-        )
+        # 在边界带生成正负点（根据模式选择）
+        if cfg.point_mode == "edge":
+            # 边缘感知：不使用文本
+            assert isinstance(scorer, EdgeAwareScorer)
+            Ppos, Pneg = make_edge_guided_points(
+                image,
+                M,
+                prior01,
+                allowed_box,
+                scorer,
+                max_total=cfg.max_points_per_iter,
+                pos_neg_ratio=cfg.pos_neg_ratio,
+                band_out=cfg.boundary_band,
+                band_in=cfg.boundary_inner_band,
+                r_out=cfg.boundary_alpha_radius_out,
+                r_in=cfg.boundary_alpha_radius_in,
+                n_samples=cfg.boundary_samples,
+            )
+        else:
+            # 语义引导（默认）
+            Ppos, Pneg = make_boundary_semantic_points(
+                image,
+                M,
+                prior01,  # 使用 prior 作为允许域
+                allowed_box,
+                scorer,
+                instance_text,
+                max_total=cfg.max_points_per_iter,
+                pos_neg_ratio=cfg.pos_neg_ratio,
+                band_out=cfg.boundary_band,
+                band_in=cfg.boundary_inner_band,
+                r_out=cfg.boundary_alpha_radius_out,
+                r_in=cfg.boundary_alpha_radius_in,
+                n_samples=cfg.boundary_samples,
+            )
 
         # 调试回调
         if debug_hook is not None:

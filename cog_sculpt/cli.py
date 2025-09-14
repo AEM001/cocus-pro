@@ -51,6 +51,20 @@ def build_cfg_from_yaml_and_args(args: argparse.Namespace) -> Config:
         cfg.k_iters = int(args.k)
     if args.max_points is not None:
         cfg.max_points_per_iter = int(args.max_points)
+    if getattr(args, "samples", None) is not None:
+        cfg.boundary_samples = int(args.samples)
+    if getattr(args, "band_out", None) is not None:
+        cfg.boundary_band = int(args.band_out)
+    if getattr(args, "band_in", None) is not None:
+        cfg.boundary_inner_band = int(args.band_in)
+    if getattr(args, "radius_out", None) is not None:
+        cfg.boundary_alpha_radius_out = int(args.radius_out)
+    if getattr(args, "radius_in", None) is not None:
+        cfg.boundary_alpha_radius_in = int(args.radius_in)
+    if getattr(args, "pos_neg_ratio", None) is not None:
+        cfg.pos_neg_ratio = float(args.pos_neg_ratio)
+    if getattr(args, "iou_eps", None) is not None:
+        cfg.iou_eps = float(args.iou_eps)
     
     # 强制使用 prior 和 boxes
     cfg.use_prior_mask_as_M0 = True
@@ -61,9 +75,18 @@ def build_cfg_from_yaml_and_args(args: argparse.Namespace) -> Config:
 def main():
     ap = argparse.ArgumentParser(description="Cog-Sculpt pipeline runner (简化版，只需输入名称)")
     ap.add_argument("--name", required=True, help="图像名（必需）")
-    ap.add_argument("--text", help="目标实例文本，若未提供则自动从 llm_out 读取")
-    ap.add_argument("--k", type=int, help="迭代轮数（可选）")
-    ap.add_argument("--max-points", type=int, help="每轮最大点数（可选）")
+    ap.add_argument("--text", help="目标实例文本，若未提供则自动从 llm_out 读取（语义模式需要，边缘模式不需要）")
+    ap.add_argument("--k", type=int, help="迭代轮数")
+    ap.add_argument("--max-points", type=int, help="每轮最大点数")
+    
+    # 边界探索可调参数（语义/边缘模式通用）
+    ap.add_argument("--samples", type=int, help="每轮边界采样点数（默认 24）")
+    ap.add_argument("--band-out", dest="band_out", type=int, help="向外探索带宽像素（默认 10）")
+    ap.add_argument("--band-in", dest="band_in", type=int, help="向内探索带宽像素（默认 6）")
+    ap.add_argument("--radius-out", dest="radius_out", type=int, help="外侧评分圆盘半径像素（默认 8）")
+    ap.add_argument("--radius-in", dest="radius_in", type=int, help="内侧评分圆盘半径像素（默认 8）")
+    ap.add_argument("--pos-neg-ratio", dest="pos_neg_ratio", type=float, help="正负点比例（默认 2.0）")
+    ap.add_argument("--iou-eps", dest="iou_eps", type=float, help="早停阈值（默认 5e-3，对应 IoU 变化 < 0.5%）")
     
     # 这些参数现在有默认值，不需要用户提供
     ap.add_argument("--image", help=argparse.SUPPRESS)
@@ -77,19 +100,22 @@ def main():
     args = ap.parse_args()
     cfg = build_cfg_from_yaml_and_args(args)
 
-    # 自动读取 instance 文本（如果未通过 --text 提供）
+    # 自动读取 instance 文本（edge 模式不需要文本）
     instance_text = args.text
-    if not instance_text and args.name:
-        instance_text = read_instance_text_from_llm_out(args.name)
-        if instance_text:
-            print(f"Auto-loaded instance text from llm_out: '{instance_text}'")
-        else:
-            raise ValueError(
-                f"No --text provided and failed to read instance text from auxiliary/llm_out/{args.name}_output.json. "
-                "Please provide --text argument or ensure the JSON file exists with 'instance' field."
-            )
-    elif not instance_text:
-        raise ValueError("Please provide --text argument or --name to auto-load from llm_out JSON.")
+    if cfg.point_mode != "edge":
+        if not instance_text and args.name:
+            instance_text = read_instance_text_from_llm_out(args.name)
+            if instance_text:
+                print(f"Auto-loaded instance text from llm_out: '{instance_text}'")
+            else:
+                raise ValueError(
+                    f"No --text provided and failed to read instance text from auxiliary/llm_out/{args.name}_output.json. "
+                    "Please provide --text argument or ensure the JSON file exists with 'instance' field."
+                )
+        elif not instance_text:
+            raise ValueError("Please provide --text argument or --name to auto-load from llm_out JSON.")
+    else:
+        instance_text = instance_text or ""
 
     assert cfg.image_path and os.path.isfile(cfg.image_path), f"Image not found: {cfg.image_path}"
     image = load_image(cfg.image_path)
@@ -114,30 +140,40 @@ def main():
     if bbox is None:
         raise ValueError("无法确定 ROI：请提供 boxes.json 或 prior 掩码")
 
-    # 初始掩码 M0：可用 prior 直接作为 M0
-    M0 = None
-    if cfg.use_prior_mask_as_M0 and cfg.prior_mask_path and os.path.isfile(cfg.prior_mask_path):
-        M0 = load_mask_png(cfg.prior_mask_path)
+    # 初始掩码 M0：强制要求 prior 掩码存在，并用作约束
+    if not (cfg.prior_mask_path and os.path.isfile(cfg.prior_mask_path)):
+        raise RuntimeError(f"Prior mask not found: {cfg.prior_mask_path}. Please ensure it exists.")
+    M0 = load_mask_png(cfg.prior_mask_path)
 
     # 构造 scorer 与 sam 封装（强制要求本地权重存在）
     scorer = None
     sam = None
 
     # 加载 Alpha-CLIP（强制 Alpha 分支权重存在）
-    from alpha_clip_rw import AlphaCLIPInference
-    try:
-        alpha_clip_model = AlphaCLIPInference(
-            model_name="ViT-L/14@336px",
-            alpha_vision_ckpt_pth="AUTO",  # 自动从 env 或 checkpoints/ 读取
-        )
-        scorer = AlphaCLIPScorer(alpha_clip_model)
-        print("Alpha-CLIP scorer loaded successfully")
-    except Exception as e:
-        raise RuntimeError(
-            f"Alpha-CLIP 加载失败: {e}\n"
-            "请确保已下载 Alpha-CLIP 视觉分支权重到 checkpoints/clip_l14_336_grit_20m_4xe.pth，"
-            "或设置环境变量 ALPHA_CLIP_ALPHA_CKPT 指向该文件。"
-        )
+    # 选择评分器：默认语义；若设置 point_mode=edge，则使用边缘感知评分
+    point_mode = os.environ.get("COG_SCULPT_POINT_MODE", "semantic").lower()
+    if point_mode == "edge":
+        from .core import EdgeAwareScorer
+        scorer = EdgeAwareScorer(image)
+        cfg.point_mode = "edge"
+        print("Edge-aware scorer loaded (no text required)")
+    else:
+        from alpha_clip_rw import AlphaCLIPInference
+        try:
+            alpha_clip_model = AlphaCLIPInference(
+                model_name="ViT-L/14@336px",
+                alpha_vision_ckpt_pth="AUTO",  # 自动从 env 或 checkpoints/ 读取
+            )
+            scorer = AlphaCLIPScorer(alpha_clip_model)
+            print("Alpha-CLIP scorer loaded successfully")
+        except Exception as e:
+            raise RuntimeError(
+                f"Alpha-CLIP 加载失败: {e}\n"
+                "请确保已下载 Alpha-CLIP 视觉分支权重到 checkpoints/clip_l14_336_grit_20m_4xe.pth，"
+                "或设置环境变量 ALPHA_CLIP_ALPHA_CKPT 指向该文件。"
+            )
+    
+    cfg.point_mode = point_mode
 
     # 加载 SAM（强制权重存在）
     from sam_integration import create_sam_wrapper
