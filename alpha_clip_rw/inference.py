@@ -145,7 +145,11 @@ class AlphaCLIPInference:
         image_tensor = self.preprocess(image).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
-            image_features = self.model.encode_image(image_tensor)
+            # 确保数据类型一致
+            image_tensor = image_tensor.to(dtype=self.model.dtype)
+            # Alpha-CLIP编码需要Alpha通道，使用全零掩码作为默认
+            alpha_dummy = torch.zeros_like(image_tensor[:, :1])
+            image_features = self.model.visual(image_tensor, alpha_dummy)
             image_features = F.normalize(image_features, dim=-1)
             
         return image_features
@@ -184,6 +188,9 @@ class AlphaCLIPInference:
         alpha_tensor = self.mask_preprocess(alpha_pil).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
+            # 确保数据类型一致（解决fp16/fp32不匹配问题）
+            image_tensor = image_tensor.to(dtype=self.model.dtype)
+            alpha_tensor = alpha_tensor.to(dtype=self.model.dtype)
             # 使用Alpha-CLIP的4通道编码
             image_features = self.model.visual(image_tensor, alpha_tensor)
             image_features = F.normalize(image_features, dim=-1)
@@ -218,9 +225,8 @@ class AlphaCLIPInference:
         # 编码文本
         text_features = self.encode_text(text)
         
-        # 计算相似度
-        similarity = (image_features @ text_features.T) / temperature
-        similarity = torch.softmax(similarity, dim=-1)
+        # 计算相似度（归一化后的余弦相似度，返回原始分数而非softmax概率）
+        similarity = image_features @ text_features.T  # [-1, 1]
         
         if isinstance(text, str):
             return float(similarity.squeeze())

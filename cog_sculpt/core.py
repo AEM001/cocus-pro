@@ -40,6 +40,20 @@ class Config:
     iou_eps: float = 5e-3
     boundary_band: int = 10
 
+    # 评分与选点行为
+    min_sigma_for_neg: float = 0.005  # 当分数方差过小（几乎无区分度）时，禁用负点
+
+    # 点提示的 ROI 约束（仅允许在初始 ROI 的轻度扩张区域内生成点）
+    roi_point_expand_scale: float = 1.2
+
+    # 温和首轮策略（小ROI或首轮减少激进点提示）
+    gentle_first_iter: bool = True
+    first_iter_max_points: int = 4
+    first_iter_disable_subdivide: bool = True
+    topk_pos_first_iter: int = 3
+    small_roi_ratio: float = 0.06
+    small_roi_max_points: int = 6
+
     prompt_template: str = "a photo of the {instance} camouflaged in the background."
 
     image_path: Optional[str] = None
@@ -124,6 +138,31 @@ def read_json(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
+def read_instance_text_from_llm_out(name: str, llm_out_root: str = "auxiliary/llm_out") -> Optional[str]:
+    """从 llm_out 目录中读取对应名字的 JSON 文件中的 instance 字段
+    
+    参数:
+    - name: 图像名称（如 'q'）
+    - llm_out_root: llm_out 目录路径，默认为 "auxiliary/llm_out"
+    
+    返回:
+    - instance 文本内容，若文件不存在或字段缺失则返回 None
+    """
+    import os
+    
+    json_path = os.path.join(llm_out_root, f"{name}_output.json")
+    
+    if not os.path.isfile(json_path):
+        return None
+        
+    try:
+        data = read_json(json_path)
+        return data.get("instance")
+    except Exception as e:
+        print(f"Warning: Failed to read instance text from {json_path}: {e}")
+        return None
+
+
 def maybe_read_boxes(path: Optional[str]) -> Optional[np.ndarray]:
     """读取候选框 JSON（若路径无效或无 boxes 字段则返回 None）
 
@@ -192,6 +231,19 @@ def box_from_xyxy_clip(y1: int, x1: int, y2: int, x2: int, H: int, W: int) -> Bo
     if x2 < x1:
         x1, x2 = x2, x1
     return Box(y1, x1, y2, x2)
+
+
+def expand_box_scale(b: Box, scale: float, H: int, W: int) -> Box:
+    """按比例扩张 Box，保持中心不变，并裁剪到图像内"""
+    cy = (b.r0 + b.r1) / 2.0
+    cx = (b.c0 + b.c1) / 2.0
+    hh = (b.r1 - b.r0) * scale / 2.0
+    hw = (b.c1 - b.c0) * scale / 2.0
+    r0 = int(max(0, np.floor(cy - hh)))
+    r1 = int(min(H, np.ceil(cy + hh)))
+    c0 = int(max(0, np.floor(cx - hw)))
+    c1 = int(min(W, np.ceil(cx + hw)))
+    return Box(r0, c0, r1, c1)
 
 
 def partition_grid(bbox: Box, grid: Tuple[int, int]) -> List[Cell]:
@@ -269,10 +321,13 @@ class AlphaCLIPScorer(RegionScorer):
 
         - image: RGB 图像
         - alpha01: 当前单元对应的软掩码（0/1 或 [0,1]）
-        - text: 已经格式化后的提示文本
+        - text: 裸 instance 文本（例如 "scorpionfish"），内部会做多模板拼接
+        
+        策略：返回“聚焦评分 - 无聚焦评分”的相对分数，增强区分度并抑制同质背景。
         """
         try:
-            score = self.model.score_region_with_templates(
+            # 聚焦评分（子区域 alpha）
+            s_focus = self.model.score_region_with_templates(
                 image, alpha01, text,
                 templates=[
                     "a photo of the {} camouflaged in the background.",
@@ -281,7 +336,20 @@ class AlphaCLIPScorer(RegionScorer):
                 ],
                 aggregate='mean'
             )
-            return score
+            # 无聚焦评分（全零 alpha 作为背景基线）
+            if alpha01 is None:
+                s_bg = 0.0
+            else:
+                s_bg = self.model.score_region_with_templates(
+                    image, np.zeros_like(alpha01, dtype=np.float32), text,
+                    templates=[
+                        "a photo of the {} camouflaged in the background.",
+                        "a photo of the {}.",
+                        "the {} blending into surroundings."
+                    ],
+                    aggregate='mean'
+                )
+            return float(s_focus - s_bg)
         except Exception as e:
             print(f"Warning: Alpha-CLIP scoring failed: {e}")
             return 0.0
@@ -346,7 +414,25 @@ def _boundary_mask(mask01: np.ndarray) -> np.ndarray:
     return (out > 0).astype(np.uint8)
 
 
-def _nearest_outside(mask01: np.ndarray, y: int, x: int, band: int) -> Optional[Tuple[int, int]]:
+def _nearest_outside(mask01: np.ndarray, y: int, x: int, band: int, limit_box: Optional[Box] = None) -> Optional[Tuple[int, int]]:
+    """从 (y,x) 周围向外扩展 band，找到最近的背景像素坐标（用于负点）
+
+    若提供 limit_box，则搜索窗口始终限制在该 box 范围内。
+    """
+    H, W = mask01.shape
+    for r in range(1, band + 1):
+        y0, y1 = max(0, y - r), min(H, y + r + 1)
+        x0, x1 = max(0, x - r), min(W, x + r + 1)
+        if limit_box is not None:
+            y0 = max(y0, limit_box.r0); y1 = min(y1, limit_box.r1)
+            x0 = max(x0, limit_box.c0); x1 = min(x1, limit_box.c1)
+            if y0 >= y1 or x0 >= x1:
+                continue
+        sub = mask01[y0:y1, x0:x1]
+        ys, xs = np.where(sub == 0)
+        if len(xs) > 0:
+            return int(y0 + ys[len(xs) // 2]), int(x0 + xs[len(xs) // 2])
+    return None
     """从 (y,x) 周围向外扩展 band，找到最近的背景像素坐标（用于负点）"""
     H, W = mask01.shape
     for r in range(1, band + 1):
@@ -366,6 +452,8 @@ def select_points_from_cells(
     max_total: int,
     pos_neg_ratio: float,
     boundary_band: int,
+    allow_negative: bool = True,
+    limit_box: Optional[Box] = None,
 ) -> Tuple[List[Point], List[Point]]:
     """根据正/负单元格从掩码中选择用于 SAM 的点提示
 
@@ -378,8 +466,12 @@ def select_points_from_cells(
     neg_pts: List[Point] = []
     max_pos = int(max_total * pos_neg_ratio / (1.0 + pos_neg_ratio))
     max_neg = max_total - max_pos
-    # 为每个正格挑选一个质心点
-    for c in pos_cells:
+    # 排序：正格按分数降序，负格按分数升序
+    pos_cells_sorted = sorted(pos_cells, key=lambda c: float(c.score or 0.0), reverse=True)
+    neg_cells_sorted = sorted(neg_cells, key=lambda c: float(c.score or 0.0))
+
+    # 为每个正格挑选一个质心点（高分优先）
+    for c in pos_cells_sorted:
         b = c.box
         sub = M[b.r0:b.r1, b.c0:b.c1]
         cyx = _centroid_of_mask(sub)
@@ -389,22 +481,25 @@ def select_points_from_cells(
             pos_pts.append(Point(y, x, True, score=float(c.score or 0.0)))
         if len(pos_pts) >= max_pos:
             break
-    # 预先计算整个掩码的边界像素集合
-    boundary = _boundary_mask(M)
-    bys, bxs = np.where(boundary > 0)
-    bcoords = list(zip(bys.tolist(), bxs.tolist()))
-    # 为每个负格在其内部找到边界点，向外扩散寻找最近的背景点
-    for c in neg_cells:
-        b = c.box
-        cand = [(y, x) for (y, x) in bcoords if (b.r0 <= y < b.r1 and b.c0 <= x < b.c1)]
-        if not cand:
-            continue
-        yx = cand[len(cand) // 2]
-        out = _nearest_outside(M, yx[0], yx[1], boundary_band)
-        if out:
-            neg_pts.append(Point(out[0], out[1], False, score=float(c.score or 0.0)))
-        if len(neg_pts) >= max_neg:
-            break
+
+    neg_pts: List[Point] = []
+    if allow_negative and max_neg > 0:
+        # 预先计算整个掩码的边界像素集合
+        boundary = _boundary_mask(M)
+        bys, bxs = np.where(boundary > 0)
+        bcoords = list(zip(bys.tolist(), bxs.tolist()))
+        # 为每个负格在其内部找到边界点，向外扩散寻找最近的背景点
+        for c in neg_cells_sorted:
+            b = c.box
+            cand = [(y, x) for (y, x) in bcoords if (b.r0 <= y < b.r1 and b.c0 <= x < b.c1)]
+            if not cand:
+                continue
+            yx = cand[len(cand) // 2]
+            out = _nearest_outside(M, yx[0], yx[1], boundary_band, limit_box=limit_box)
+            if out:
+                neg_pts.append(Point(out[0], out[1], False, score=float(c.score or 0.0)))
+            if len(neg_pts) >= max_neg:
+                break
     return pos_pts, neg_pts
 
 
@@ -557,18 +652,29 @@ def sculpting_pipeline(
         M = (sam.predict_box(image, bbox) > 0).astype(np.uint8)
     M = smooth_mask(M)
 
+    H, W = image.shape[:2]
+    roi_area = (bbox.r1 - bbox.r0) * (bbox.c1 - bbox.c0)
+    img_area = H * W
+    roi_ratio = float(roi_area) / float(img_area + 1e-6)
+
     for it in range(cfg.k_iters):
         # 1) 初始网格：将 bbox 按 cfg.grid_init 划为多个叶子单元
         leaf_cells: List[Cell] = partition_grid(bbox, cfg.grid_init)
 
         # 2) 递归细分：仅对不确定单元格，且尺寸 >= min_cell，深度 < max_depth
+        # 根据迭代轮次决定本轮最大细分深度（首轮可禁用细分）
+        max_depth_cur = cfg.max_depth
+        if it == 0 and cfg.gentle_first_iter and cfg.first_iter_disable_subdivide:
+            max_depth_cur = 0
+
         while True:
             # 2.1) 给当前所有叶子打分（基于当前 M 构建 alpha）
-            prompt = cfg.prompt_template.format(instance=instance_text)
+            # 传入裸的 instance 文本，由具体的 scorer 内部做模板拼接
+            text_for_score = instance_text
             for c in leaf_cells:
                 if c.score is None:
                     alpha = build_alpha_for_cell(M, c)
-                    c.score = float(scorer.score(image, alpha, prompt))
+                    c.score = float(scorer.score(image, alpha, text_for_score))
 
             # 2.2) 基于当前叶子阈分
             pos_now, neg_now, unc_now = threshold_cells(leaf_cells)
@@ -576,7 +682,7 @@ def sculpting_pipeline(
             # 2.3) 选择需要细分的“不确定格”
             to_subdivide: List[Cell] = []
             for c in unc_now:
-                if c.depth >= cfg.max_depth:
+                if c.depth >= max_depth_cur:
                     continue
                 h, w = _cell_size(c)
                 if min(h, w) < cfg.min_cell:
@@ -599,15 +705,40 @@ def sculpting_pipeline(
                 if c.depth > 0 and c.score is None:
                     pass  # 明确保留 None，下一轮会评分
 
-        # 3) 最终基于叶子集合的阈分，产出正/负格
-        pos_cells, neg_cells, _ = threshold_cells(leaf_cells)
+        # 3) 基于叶子集合的分布，决定选点候选
+        scores_np = np.array([float(c.score) for c in leaf_cells if c.score is not None], dtype=np.float32)
+        sigma = float(scores_np.std()) if scores_np.size else 0.0
+
+        if it == 0 and cfg.gentle_first_iter:
+            # 首轮：仅从最高分的前 K 个单元取正点，禁用负点
+            K = min(cfg.topk_pos_first_iter, len(leaf_cells))
+            pos_cells = sorted(leaf_cells, key=lambda c: float(c.score or 0.0), reverse=True)[:K]
+            neg_cells: List[Cell] = []
+            allow_neg = False
+        else:
+            # 常规：阈分 + 仅在区分度足够时允许负点
+            pos_cells, neg_cells, _ = threshold_cells(leaf_cells)
+            allow_neg = (sigma >= cfg.min_sigma_for_neg)
+
+        # 本轮最大点数（小ROI或首轮时进一步收紧）
+        iter_max_points = cfg.max_points_per_iter
+        if roi_ratio <= cfg.small_roi_ratio:
+            iter_max_points = min(iter_max_points, cfg.small_roi_max_points)
+        if it == 0 and cfg.gentle_first_iter:
+            iter_max_points = min(iter_max_points, cfg.first_iter_max_points)
+
+        # 计算允许点生成的区域（初始 ROI 的轻度扩张）
+        allowed_box = expand_box_scale(bbox, cfg.roi_point_expand_scale, H, W)
+
         Ppos, Pneg = select_points_from_cells(
             M,
             pos_cells,
             neg_cells,
-            max_total=cfg.max_points_per_iter,
+            max_total=iter_max_points,
             pos_neg_ratio=cfg.pos_neg_ratio,
             boundary_band=cfg.boundary_band,
+            allow_negative=allow_neg,
+            limit_box=allowed_box,
         )
         if debug_hook is not None:
             try:

@@ -22,6 +22,7 @@ from .core import (
     sculpting_pipeline,
     save_mask_png,
     Box,
+    read_instance_text_from_llm_out,
 )
 
 
@@ -87,7 +88,7 @@ def main():
     ap.add_argument("--prior-mask", dest="prior_mask", help="box_out 生成的初始掩码PNG")
     ap.add_argument("--out-root", help="输出根目录（默认 sculpt_out）")
 
-    ap.add_argument("--text", required=True, help="目标实例文本（例如 'scorpionfish'）")
+    ap.add_argument("--text", help="目标实例文本（例如 'scorpionfish'），若未提供则自动从 llm_out/{name}_output.json 读取")
     ap.add_argument("--grid", help="初始子网格，如 3x3")
     ap.add_argument("--k", type=int, help="迭代轮数")
     ap.add_argument("--margin", type=float, help="ROI padding 比例")
@@ -99,6 +100,20 @@ def main():
 
     args = ap.parse_args()
     cfg = build_cfg_from_yaml_and_args(args)
+
+    # 自动读取 instance 文本（如果未通过 --text 提供）
+    instance_text = args.text
+    if not instance_text and args.name:
+        instance_text = read_instance_text_from_llm_out(args.name)
+        if instance_text:
+            print(f"Auto-loaded instance text from llm_out: '{instance_text}'")
+        else:
+            raise ValueError(
+                f"No --text provided and failed to read instance text from auxiliary/llm_out/{args.name}_output.json. "
+                "Please provide --text argument or ensure the JSON file exists with 'instance' field."
+            )
+    elif not instance_text:
+        raise ValueError("Please provide --text argument or --name to auto-load from llm_out JSON.")
 
     assert cfg.image_path and os.path.isfile(cfg.image_path), f"Image not found: {cfg.image_path}"
     image = load_image(cfg.image_path)
@@ -150,7 +165,6 @@ def main():
 
     # 加载 SAM（强制权重存在）
     from sam_integration import create_sam_wrapper
-    import os
     sam_ckpt = "models/sam_vit_h_4b8939.pth"
     if not os.path.isfile(sam_ckpt):
         raise RuntimeError(
@@ -206,7 +220,7 @@ def main():
     M_final = sculpting_pipeline(
         image=image,
         bbox=bbox,
-        instance_text=args.text,
+        instance_text=instance_text,
         sam=sam,
         scorer=scorer,
         cfg=cfg,
