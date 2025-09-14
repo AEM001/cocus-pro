@@ -34,7 +34,7 @@ MANIFEST
 .idea/
 
 # 忽略输出目录
-auxiliary/out/
-auxiliary/box_out/
-auxiliary/llm_out/
-examples/output/
+# auxiliary/out/
+# auxiliary/box_out/
+# auxiliary/llm_out/
+# examples/output/
