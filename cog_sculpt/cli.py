@@ -38,65 +38,41 @@ class NoOpSam(SamWrapper):
 
 def build_cfg_from_yaml_and_args(args: argparse.Namespace) -> Config:
     cfg = Config()
-    if args.config:
-        with open(args.config, "r") as f:
-            y = yaml.safe_load(f) or {}
-        paths = (y.get("paths") or {})
-        # 路径格式化
-        name = args.name or ""
-        cfg.image_path = (args.image or (paths.get("image") or "")).format(name=name) or None
-        cfg.meta_path = (args.meta or (paths.get("meta") or "")).format(name=name) or None
-        cfg.boxes_json_path = (args.boxes or (paths.get("sam_boxes") or "")).format(name=name) or None
-        # prior 掩码默认放在 box_out/{name}/{name}_prior_mask.png
-        out_root = (paths.get("prior_out_root") or "box_out").format(name=name)
-        cfg.prior_mask_path = args.prior_mask or (
-            os.path.join(out_root, name, f"{name}_prior_mask.png") if name else None
-        )
-        cfg.out_root = (paths.get("sculpt_out_root") or cfg.out_root)
-    else:
-        # 仅命令行
-        cfg.image_path = args.image
-        cfg.meta_path = args.meta
-        cfg.boxes_json_path = args.boxes
-        cfg.prior_mask_path = args.prior_mask
-        if args.out_root:
-            cfg.out_root = args.out_root
-
+    name = args.name or ""
+    
+    # 默认路径设置（基于 name）
+    cfg.image_path = args.image or f"auxiliary/images/{name}.png"
+    cfg.boxes_json_path = args.boxes or f"auxiliary/box_out/{name}/{name}_sam_boxes.json"
+    cfg.prior_mask_path = args.prior_mask or f"auxiliary/box_out/{name}/{name}_prior_mask.png"
+    cfg.out_root = args.out_root or "pipeline_output"
+    
     # 其它参数覆盖（若提供）
     if args.k is not None:
         cfg.k_iters = int(args.k)
-    if args.grid is not None:
-        gh, gw = [int(x) for x in args.grid.split("x")] if isinstance(args.grid, str) else args.grid
-        cfg.grid_init = (gh, gw)
-    if args.margin is not None:
-        cfg.bbox_margin = float(args.margin)
     if args.max_points is not None:
         cfg.max_points_per_iter = int(args.max_points)
-
-    cfg.use_prior_mask_as_M0 = args.use_prior
-    cfg.use_boxes_for_roi = args.use_boxes
+    
+    # 强制使用 prior 和 boxes
+    cfg.use_prior_mask_as_M0 = True
+    cfg.use_boxes_for_roi = True
     return cfg
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Cog-Sculpt pipeline runner (prototype)")
-    ap.add_argument("--config", help="YAML 配置文件路径")
-    ap.add_argument("--name", help="图像名（用于路径模板 {name}）")
-    ap.add_argument("--image", help="输入图片路径")
-    ap.add_argument("--meta", help="meta.json（如需从 ids 回推 ROI）")
-    ap.add_argument("--boxes", help="boxes.json（如需从框推 ROI）")
-    ap.add_argument("--prior-mask", dest="prior_mask", help="box_out 生成的初始掩码PNG")
-    ap.add_argument("--out-root", help="输出根目录（默认 sculpt_out）")
-
-    ap.add_argument("--text", help="目标实例文本（例如 'scorpionfish'），若未提供则自动从 llm_out/{name}_output.json 读取")
-    ap.add_argument("--grid", help="初始子网格，如 3x3")
-    ap.add_argument("--k", type=int, help="迭代轮数")
-    ap.add_argument("--margin", type=float, help="ROI padding 比例")
-    ap.add_argument("--max-points", type=int, help="每轮最大点数")
-
-    ap.add_argument("--use-prior", action="store_true", help="用 prior 掩码作为 M0（推荐）")
-    ap.add_argument("--use-boxes", action="store_true", help="优先用 boxes.json 推 ROI（否则用 prior 掩码 BBox）")
-    ap.add_argument("--debug", action="store_true", help="保存每轮中间结果（点/分数/叠加图）")
+    ap = argparse.ArgumentParser(description="Cog-Sculpt pipeline runner (简化版，只需输入名称)")
+    ap.add_argument("--name", required=True, help="图像名（必需）")
+    ap.add_argument("--text", help="目标实例文本，若未提供则自动从 llm_out 读取")
+    ap.add_argument("--k", type=int, help="迭代轮数（可选）")
+    ap.add_argument("--max-points", type=int, help="每轮最大点数（可选）")
+    
+    # 这些参数现在有默认值，不需要用户提供
+    ap.add_argument("--image", help=argparse.SUPPRESS)
+    ap.add_argument("--boxes", help=argparse.SUPPRESS)
+    ap.add_argument("--prior-mask", dest="prior_mask", help=argparse.SUPPRESS)
+    ap.add_argument("--out-root", help=argparse.SUPPRESS)
+    ap.add_argument("--use-prior", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--use-boxes", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--debug", action="store_true", default=True, help=argparse.SUPPRESS)  # 默认开启debug
 
     args = ap.parse_args()
     cfg = build_cfg_from_yaml_and_args(args)

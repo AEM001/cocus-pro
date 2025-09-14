@@ -467,24 +467,6 @@ def _nearest_inside(mask01: np.ndarray, y: int, x: int, band: int, limit_box: Op
         if len(xs) > 0:
             return int(y0 + ys[len(xs) // 2]), int(x0 + xs[len(xs) // 2])
     return None
-    """从 (y,x) 周围向外扩展 band，找到最近的背景像素坐标（用于负点）
-
-    若提供 limit_box，则搜索窗口始终限制在该 box 范围内。
-    """
-    H, W = mask01.shape
-    for r in range(1, band + 1):
-        y0, y1 = max(0, y - r), min(H, y + r + 1)
-        x0, x1 = max(0, x - r), min(W, x + r + 1)
-        if limit_box is not None:
-            y0 = max(y0, limit_box.r0); y1 = min(y1, limit_box.r1)
-            x0 = max(x0, limit_box.c0); x1 = min(x1, limit_box.c1)
-            if y0 >= y1 or x0 >= x1:
-                continue
-        sub = mask01[y0:y1, x0:x1]
-        ys, xs = np.where(sub == 0)
-        if len(xs) > 0:
-            return int(y0 + ys[len(xs) // 2]), int(x0 + xs[len(xs) // 2])
-    return None
 
 
 def _sample_boundary_points(M: np.ndarray, allowed_box: Box, n_samples: int) -> List[Tuple[int, int]]:
@@ -580,57 +562,6 @@ def make_boundary_semantic_points(
     return pos_pts, neg_pts
 
 
-def make_boundary_refine_points(
-    M: np.ndarray,
-    allowed_box: Box,
-    n_samples: int,
-) -> List[Tuple[int, int]]:
-    """均匀采样边界点（限制在 allowed_box 内）"""
-    boundary = _boundary_mask(M)
-    boundary = _boundary_mask(M)
-    bys, bxs = np.where(boundary > 0)
-    coords = [(int(y), int(x)) for y, x in zip(bys.tolist(), bxs.tolist())
-              if (allowed_box.r0 <= y < allowed_box.r1 and allowed_box.c0 <= x < allowed_box.c1)]
-    if not coords:
-        return []
-    if n_samples <= 0 or n_samples >= len(coords):
-        return coords
-    step = max(1, len(coords) // n_samples)
-    return coords[::step][:n_samples]
-
-
-def make_boundary_refine_points(
-    M: np.ndarray,
-    allowed_box: Box,
-    max_total: int,
-    pos_neg_ratio: float,
-    boundary_band_out: int,
-    boundary_band_in: int,
-) -> Tuple[List[Point], List[Point]]:
-    """在当前掩码边界附近生成正/负点对，用于细修边界"""
-    pos_pts: List[Point] = []
-    neg_pts: List[Point] = []
-    max_pos = int(max_total * pos_neg_ratio / (1.0 + pos_neg_ratio))
-    max_neg = max_total - max_pos
-
-    # 采样边界点
-    cand = _sample_boundary_points(M, allowed_box, n_samples=max_total * 4)
-    if not cand:
-        return pos_pts, neg_pts
-
-    for (y, x) in cand:
-        if len(pos_pts) < max_pos:
-            inside = _nearest_inside(M, y, x, boundary_band_in, limit_box=allowed_box)
-            if inside is not None and M[inside[0], inside[1]] == 1:
-                pos_pts.append(Point(inside[0], inside[1], True, score=1.0))
-        if len(neg_pts) < max_neg:
-            outside = _nearest_outside(M, y, x, boundary_band_out, limit_box=allowed_box)
-            if outside is not None and M[outside[0], outside[1]] == 0:
-                neg_pts.append(Point(outside[0], outside[1], False, score=1.0))
-        if len(pos_pts) >= max_pos and len(neg_pts) >= max_neg:
-            break
-
-    return pos_pts, neg_pts
 
 
 def select_points_from_cells(
@@ -818,231 +749,69 @@ def sculpting_pipeline(
     sam: SamWrapper,
     scorer: RegionScorer,
     cfg: Config,
-    initial_mask_M0: Optional[np.ndarray] = None,
+    initial_mask_M0: np.ndarray,
     debug_hook: Optional[Callable[..., None]] = None,
 ) -> np.ndarray:
-    """主流程：语义雕刻 + SAM 交互迭代，输出最终掩码
+    """主流程（仅边界语义精修）：在 prior 掩码约束下进行边界语义驱动的点提示迭代。
 
-    参数：
-    - image: 输入 RGB 图像
-    - bbox: 处理的 ROI 区域
-    - instance_text: 实例类别文本（将被 format 到 cfg.prompt_template 中）
-    - sam: SAM 包装器（需提供 set_image / predict 接口）
-    - scorer: 区域语义评分器（如 AlphaCLIPScorer）
-    - cfg: 管线配置
-    - initial_mask_M0: 初始掩码（若为 None 则用 bbox 初始化）
-    - debug_hook: 可选调试回调，观察每轮状态
+    流程：
+    - 用 SAM 框预测与 prior 掩码求交作为初始掩码 M。
+    - 每轮在边界采样，向内/外探索小圆盘，使用 Alpha-CLIP 语义评分选择正负点。
+    - 用 SAM 点提示更新掩码（始终限制在 prior 区域内）。
     """
-    # 步骤0：无论是否提供 initial_mask_M0，都先用 SAM 的框预测得到 M0_sam
+    # 初始化：SAM 框预测 ∩ prior 掩码
     M0_sam = (sam.predict_box(image, bbox) > 0).astype(np.uint8)
     M0_sam = smooth_mask(M0_sam)
-    # 若提供了初始掩码（如 prior），则与 SAM 预测做交集，限制到 prior 指定区域
-    if initial_mask_M0 is not None:
-        prior01 = (initial_mask_M0 > 0).astype(np.uint8)
-        M = (M0_sam & prior01).astype(np.uint8)
-    else:
-        M = M0_sam
+    prior01 = (initial_mask_M0 > 0).astype(np.uint8)
+    M = (M0_sam & prior01).astype(np.uint8)
 
-    H, W = image.shape[:2]
-    roi_area = (bbox.r1 - bbox.r0) * (bbox.c1 - bbox.c0)
-    img_area = H * W
-    roi_ratio = float(roi_area) / float(img_area + 1e-6)
-
-    # 计算全程固定的“允许点域”（初始 ROI 的轻度扩张）
-    allowed_box = expand_box_scale(bbox, cfg.roi_point_expand_scale, H, W)
-    allowed_mask = np.zeros((H, W), dtype=np.uint8)
-    allowed_mask[allowed_box.r0:allowed_box.r1, allowed_box.c0:allowed_box.c1] = 1
-
+    # 在 prior 区域内进行迭代（无需额外扩张）
     for it in range(cfg.k_iters):
-        # 迭代开始时对当前掩码进行允许域硬门控（防止外溢）
-        if cfg.gate_mask_outside_roi:
-            M = (M & allowed_mask).astype(np.uint8)
-
-        # 选择本轮网格（首轮粗，后续细）
-        grid_this_iter: Tuple[int, int]
-        if it == 0:
-            grid_this_iter = cfg.grid_init
-        else:
-            grid_this_iter = cfg.fine_grid if cfg.fine_after_first else cfg.grid_init
-
-        # 根据当前掩码估计更紧致的工作 bbox
-        work_bbox: Box = bbox
-        tight_xyxy = bbox_from_mask(M)
-        if tight_xyxy is not None:
-            x1, y1, x2, y2 = tight_xyxy
-            work_bbox = box_from_xyxy_clip(y1, x1, y2, x2, H, W)
-
-        # 若采用边界精修模式，并且不是首轮，则直接从边界生成点，跳过全局网格打分
-        # 先计算本轮最大点数（小ROI或首轮时进一步收紧）
-        iter_max_points = cfg.max_points_per_iter
-        if roi_ratio <= cfg.small_roi_ratio:
-            iter_max_points = min(iter_max_points, cfg.small_roi_max_points)
-        if it == 0 and cfg.gentle_first_iter:
-            iter_max_points = min(iter_max_points, cfg.first_iter_max_points)
-
-        if cfg.boundary_refine_only and it >= 1:
-            # 在边界带生成点（语义引导）
-            Ppos, Pneg = make_boundary_semantic_points(
-                image,
-                (M & allowed_mask).astype(np.uint8),
-                allowed_mask,
-                allowed_box,
-                scorer,
-                instance_text,
-                max_total=iter_max_points,
-                pos_neg_ratio=cfg.pos_neg_ratio,
-                band_out=cfg.boundary_band,
-                band_in=cfg.boundary_inner_band,
-                r_out=cfg.boundary_alpha_radius_out,
-                r_in=cfg.boundary_alpha_radius_in,
-                n_samples=cfg.boundary_samples,
-            )
-            # 调试输出
-            if debug_hook is not None:
-                try:
-                    debug_hook(
-                        it=it,
-                        cells=[],
-                        pos_cells=[],
-                        neg_cells=[],
-                        pos_points=Ppos,
-                        neg_points=Pneg,
-                        mask=(M & allowed_mask).astype(np.uint8),
-                    )
-                except Exception:
-                    pass
-            # 若首轮需要跳过更新（保留初始效果好），则不做 SAM 更新
-            # 此处 it>=1，不受 skip_update_first_iter 影响
-            if (len(Ppos) + len(Pneg)) == 0:
-                break
-            M_new = (sam.predict_points(image, Ppos, Pneg) > 0).astype(np.uint8)
-            if cfg.gate_mask_outside_roi:
-                M_new = (M_new & allowed_mask).astype(np.uint8)
-            M_new = smooth_mask(M_new)
-            if iou(M_new, M) > (1.0 - cfg.iou_eps):
-                break
-            M = M_new
-            continue
-
-        # 1) 初始网格：将 work_bbox 按 grid_this_iter 划为多个叶子单元
-        leaf_cells: List[Cell] = partition_grid(work_bbox, grid_this_iter)
-
-        # 2) 递归细分：仅对不确定单元格，且尺寸 >= min_cell，深度 < max_depth
-        # 根据迭代轮次决定本轮最大细分深度（首轮可禁用细分）
-        # 本轮细分阈值与深度
-        max_depth_cur = cfg.max_depth if it == 0 else (cfg.fine_max_depth if cfg.fine_after_first else cfg.max_depth)
-        if it == 0 and cfg.gentle_first_iter and cfg.first_iter_disable_subdivide:
-            max_depth_cur = 0
-        min_cell_cur = cfg.min_cell if it == 0 else (cfg.fine_min_cell if cfg.fine_after_first else cfg.min_cell)
-
-        while True:
-            # 2.1) 给当前所有叶子打分（基于当前 M 构建 alpha）
-            # 传入裸的 instance 文本，由具体的 scorer 内部做模板拼接
-            text_for_score = instance_text
-            for c in leaf_cells:
-                if c.score is None:
-                    # 使用允许域门控后的掩码进行子区域 alpha 构造
-                    Mg = (M & allowed_mask).astype(np.uint8)
-                    alpha = build_alpha_for_cell(Mg, c)
-                    c.score = float(scorer.score(image, alpha, text_for_score))
-
-            # 2.2) 基于当前叶子阈分
-            pos_now, neg_now, unc_now = threshold_cells(leaf_cells)
-
-            # 2.3) 选择需要细分的“不确定格”
-            to_subdivide: List[Cell] = []
-            for c in unc_now:
-                if c.depth >= max_depth_cur:
-                    continue
-                h, w = _cell_size(c)
-                if min(h, w) < min_cell_cur:
-                    continue
-                to_subdivide.append(c)
-
-            if not to_subdivide:
-                break
-
-            # 2.4) 用子格替换父格，子格待评分
-            new_leaves: List[Cell] = []
-            for c in leaf_cells:
-                if c in to_subdivide:
-                    new_leaves.extend(subdivide_cell(c))
-                else:
-                    new_leaves.append(c)
-            leaf_cells = new_leaves
-            # 2.5) 将新加入的子格 score 置空，避免复用父格分数
-            for c in leaf_cells:
-                if c.depth > 0 and c.score is None:
-                    pass  # 明确保留 None，下一轮会评分
-
-        # 3) 基于叶子集合的分布，决定选点候选
-        scores_np = np.array([float(c.score) for c in leaf_cells if c.score is not None], dtype=np.float32)
-        sigma = float(scores_np.std()) if scores_np.size else 0.0
-
-        if it == 0 and cfg.gentle_first_iter:
-            # 首轮：仅从最高分的前 K 个单元取正点，禁用负点
-            K = min(cfg.topk_pos_first_iter, len(leaf_cells))
-            pos_cells = sorted(leaf_cells, key=lambda c: float(c.score or 0.0), reverse=True)[:K]
-            neg_cells: List[Cell] = []
-            allow_neg = False
-        else:
-            # 常规：阈分 + 仅在区分度足够时允许负点
-            pos_cells, neg_cells, _ = threshold_cells(leaf_cells)
-            allow_neg = (sigma >= cfg.min_sigma_for_neg)
-
-        # 本轮最大点数（小ROI或首轮时进一步收紧）
-        # 注意：iter_max_points 已在上文 boundary_refine_only 分支前计算过，为避免重复，这里若未定义则计算
-        try:
-            iter_max_points
-        except NameError:
-            iter_max_points = cfg.max_points_per_iter
-            if roi_ratio <= cfg.small_roi_ratio:
-                iter_max_points = min(iter_max_points, cfg.small_roi_max_points)
-            if it == 0 and cfg.gentle_first_iter:
-                iter_max_points = min(iter_max_points, cfg.first_iter_max_points)
-
-        # 计算允许点生成的区域（初始 ROI 的轻度扩张）
-        allowed_box = expand_box_scale(bbox, cfg.roi_point_expand_scale, H, W)
-
-        Ppos, Pneg = select_points_from_cells(
-            (M & allowed_mask).astype(np.uint8),
-            pos_cells,
-            neg_cells,
-            max_total=iter_max_points,
+        # 在边界带生成语义驱动的正负点
+        Ppos, Pneg = make_boundary_semantic_points(
+            image,
+            M,
+            prior01,  # 使用 prior 作为允许域
+            bbox,
+            scorer,
+            instance_text,
+            max_total=cfg.max_points_per_iter,
             pos_neg_ratio=cfg.pos_neg_ratio,
-            boundary_band=cfg.boundary_band,
-            allow_negative=allow_neg,
-            limit_box=allowed_box,
+            band_out=cfg.boundary_band,
+            band_in=cfg.boundary_inner_band,
+            r_out=cfg.boundary_alpha_radius_out,
+            r_in=cfg.boundary_alpha_radius_in,
+            n_samples=cfg.boundary_samples,
         )
+
+        # 调试回调
         if debug_hook is not None:
             try:
                 debug_hook(
                     it=it,
-                    cells=leaf_cells,
-                    pos_cells=pos_cells,
-                    neg_cells=neg_cells,
+                    cells=[],
+                    pos_cells=[],
+                    neg_cells=[],
                     pos_points=Ppos,
                     neg_points=Pneg,
-                    mask=(M & allowed_mask).astype(np.uint8),
+                    mask=M,
                 )
             except Exception:
                 pass
-        # 首轮如需跳过更新（保留初始 SAM 效果），则直接进入下一轮
-        if cfg.boundary_refine_only and it == 0 and cfg.skip_update_first_iter:
-            continue
-        # 若本轮没有可用点，提前终止
+
+        # 若无可用点，提前终止
         if (len(Ppos) + len(Pneg)) == 0:
             break
-        # 4) 使用 SAM 点提示进行掩码细化
+
+        # 使用 SAM 点提示更新掩码，并与 prior 求交
         M_new = (sam.predict_points(image, Ppos, Pneg) > 0).astype(np.uint8)
-        # 预测后先做允许域硬门控，再平滑
-        if cfg.gate_mask_outside_roi:
-            M_new = (M_new & allowed_mask).astype(np.uint8)
+        M_new = (M_new & prior01).astype(np.uint8)  # 强制约束在 prior 区域内
         M_new = smooth_mask(M_new)
-        # 5) 早停：若两次掩码非常相似（IoU 足够高），则停止
+
+        # 早停：与前一轮 IoU 足够高则停止
         if iou(M_new, M) > (1.0 - cfg.iou_eps):
             break
-        # 6) 否则更新掩码并进入下一轮
+
         M = M_new
 
     return M
