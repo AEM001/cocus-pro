@@ -1,78 +1,78 @@
 {
   "pos_points": [
     {
-      "y": 214,
-      "x": 988,
+      "y": 735,
+      "x": 1799,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.0062255859375
     },
     {
-      "y": 214,
-      "x": 1388,
+      "y": 687,
+      "x": 1572,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.00537109375
     },
     {
-      "y": 214,
-      "x": 1790,
+      "y": 742,
+      "x": 1461,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.00341796875
     },
     {
-      "y": 214,
-      "x": 2192,
+      "y": 720,
+      "x": 1851,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.0030517578125
     },
     {
-      "y": 261,
-      "x": 859,
+      "y": 432,
+      "x": 538,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.0028076171875
     },
     {
-      "y": 313,
-      "x": 737,
+      "y": 213,
+      "x": 991,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.0020751953125
     },
     {
-      "y": 375,
-      "x": 628,
+      "y": 698,
+      "x": 1081,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.0013427734375
     },
     {
-      "y": 441,
-      "x": 532,
+      "y": 1099,
+      "x": 1266,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.001220703125
     }
   ],
   "neg_points": [
     {
-      "y": 213,
-      "x": 988,
+      "y": 811,
+      "x": 1863,
       "is_positive": false,
-      "score": 1.0
+      "score": -0.0032958984375
     },
     {
-      "y": 213,
-      "x": 2198,
+      "y": 973,
+      "x": 1647,
       "is_positive": false,
-      "score": 1.0
+      "score": -0.0023193359375
     },
     {
-      "y": 260,
-      "x": 857,
+      "y": 1009,
+      "x": 1506,
       "is_positive": false,
-      "score": 1.0
+      "score": -0.002197265625
     },
     {
-      "y": 311,
-      "x": 739,
+      "y": 1074,
+      "x": 543,
       "is_positive": false,
-      "score": 1.0
+      "score": -0.001708984375
     }
   ],
   "cells": []

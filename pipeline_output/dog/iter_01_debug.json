@@ -1,78 +1,78 @@
 {
   "pos_points": [
     {
-      "y": 329,
-      "x": 716,
+      "y": 472,
+      "x": 1770,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.0047607421875
     },
     {
-      "y": 334,
-      "x": 1465,
+      "y": 952,
+      "x": 517,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.004638671875
     },
     {
-      "y": 347,
+      "y": 434,
+      "x": 565,
+      "is_positive": true,
+      "score": 0.00439453125
+    },
+    {
+      "y": 346,
       "x": 1077,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.0037841796875
     },
     {
-      "y": 355,
-      "x": 1493,
+      "y": 403,
+      "x": 630,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.0035400390625
     },
     {
-      "y": 372,
-      "x": 647,
+      "y": 691,
+      "x": 1853,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.003173828125
     },
     {
-      "y": 390,
-      "x": 1413,
+      "y": 450,
+      "x": 548,
       "is_positive": true,
-      "score": 1.0
+      "score": 0.002685546875
     },
     {
-      "y": 404,
-      "x": 584,
+      "y": 609,
+      "x": 605,
       "is_positive": true,
-      "score": 1.0
-    },
-    {
-      "y": 424,
-      "x": 964,
-      "is_positive": true,
-      "score": 1.0
+      "score": 0.0025634765625
     }
   ],
   "neg_points": [
     {
-      "y": 328,
-      "x": 715,
+      "y": 1138,
+      "x": 1474,
       "is_positive": false,
-      "score": 1.0
+      "score": -0.00634765625
     },
     {
-      "y": 332,
-      "x": 1466,
+      "y": 1253,
+      "x": 1552,
       "is_positive": false,
-      "score": 1.0
+      "score": -0.0018310546875
     },
     {
-      "y": 346,
-      "x": 1076,
+      "y": 547,
+      "x": 1748,
       "is_positive": false,
-      "score": 1.0
+      "score": -0.001220703125
     },
     {
-      "y": 357,
-      "x": 1492,
+      "y": 519,
+      "x": 711,
       "is_positive": false,
-      "score": 1.0
+      "score": -0.0008544921875
     }
   ],
   "cells": []

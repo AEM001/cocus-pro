@@ -64,6 +64,8 @@ class Config:
     skip_update_first_iter: bool = True
     boundary_samples: int = 24
     boundary_inner_band: int = 6
+    boundary_alpha_radius_in: int = 8
+    boundary_alpha_radius_out: int = 8
 
     prompt_template: str = "a photo of the {instance} camouflaged in the background."
 
@@ -499,6 +501,104 @@ def _sample_boundary_points(M: np.ndarray, allowed_box: Box, n_samples: int) -> 
     return coords[::step][:n_samples]
 
 
+def _disk_mask(H: int, W: int, cy: int, cx: int, r: int) -> np.ndarray:
+    """生成以 (cy, cx) 为中心、半径 r 的圆盘二值掩码"""
+    y0 = max(0, cy - r); y1 = min(H, cy + r + 1)
+    x0 = max(0, cx - r); x1 = min(W, cx + r + 1)
+    if y0 >= y1 or x0 >= x1:
+        return np.zeros((H, W), dtype=np.uint8)
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    mask_local = ((yy - cy) ** 2 + (xx - cx) ** 2) <= (r * r)
+    out = np.zeros((H, W), dtype=np.uint8)
+    out[y0:y1, x0:x1] = mask_local.astype(np.uint8)
+    return out
+
+
+def make_boundary_semantic_points(
+    image: np.ndarray,
+    M: np.ndarray,
+    allowed_mask: np.ndarray,
+    allowed_box: Box,
+    scorer: RegionScorer,
+    instance_text: str,
+    max_total: int,
+    pos_neg_ratio: float,
+    band_out: int,
+    band_in: int,
+    r_out: int,
+    r_in: int,
+    n_samples: int,
+) -> Tuple[List[Point], List[Point]]:
+    """使用 Alpha-CLIP 语义评分在边界处生成正负点：
+    - 正点：在边界外侧的候选圆盘语义分数高 → 需要扩张
+    - 负点：在边界内侧的候选圆盘语义分数低 → 需要收缩
+    """
+    H, W = M.shape
+    pos_candidates: List[Tuple[float, Tuple[int, int]]] = []  # (score, (y,x) outside)
+    neg_candidates: List[Tuple[float, Tuple[int, int]]] = []  # (score, (y,x) inside), score用作升序选择
+
+    samples = _sample_boundary_points(M, allowed_box, n_samples=n_samples)
+    if not samples:
+        return [], []
+
+    # 逐点评估内/外小圆盘的语义分数
+    for (y, x) in samples:
+        inside = _nearest_inside(M, y, x, band_in, limit_box=allowed_box)
+        outside = _nearest_outside(M, y, x, band_out, limit_box=allowed_box)
+        # 外侧：若存在候选点，则生成小圆盘 alpha 并评分
+        if outside is not None:
+            oy, ox = outside
+            alpha_out = _disk_mask(H, W, oy, ox, r_out)
+            alpha_out = (alpha_out & allowed_mask).astype(np.uint8)
+            if alpha_out.sum() > 0:
+                s_out = float(scorer.score(image, alpha_out, instance_text))
+                pos_candidates.append((s_out, (oy, ox)))
+        # 内侧：若存在候选点，则生成小圆盘 alpha 并评分
+        if inside is not None:
+            iy, ix = inside
+            alpha_in = _disk_mask(H, W, iy, ix, r_in)
+            alpha_in = (alpha_in & allowed_mask).astype(np.uint8)
+            if alpha_in.sum() > 0:
+                s_in = float(scorer.score(image, alpha_in, instance_text))
+                neg_candidates.append((s_in, (iy, ix)))
+
+    # 选择点：正点取语义分数最高的前 K 个，负点取分数最低的前 K 个
+    max_pos = int(max_total * pos_neg_ratio / (1.0 + pos_neg_ratio))
+    max_neg = max_total - max_pos
+
+    pos_candidates.sort(key=lambda t: t[0], reverse=True)
+    neg_candidates.sort(key=lambda t: t[0])
+
+    pos_pts: List[Point] = []
+    neg_pts: List[Point] = []
+
+    for s, (py, px) in pos_candidates[:max_pos]:
+        pos_pts.append(Point(py, px, True, score=float(s)))
+    for s, (ny, nx) in neg_candidates[:max_neg]:
+        neg_pts.append(Point(ny, nx, False, score=float(s)))
+
+    return pos_pts, neg_pts
+
+
+def make_boundary_refine_points(
+    M: np.ndarray,
+    allowed_box: Box,
+    n_samples: int,
+) -> List[Tuple[int, int]]:
+    """均匀采样边界点（限制在 allowed_box 内）"""
+    boundary = _boundary_mask(M)
+    boundary = _boundary_mask(M)
+    bys, bxs = np.where(boundary > 0)
+    coords = [(int(y), int(x)) for y, x in zip(bys.tolist(), bxs.tolist())
+              if (allowed_box.r0 <= y < allowed_box.r1 and allowed_box.c0 <= x < allowed_box.c1)]
+    if not coords:
+        return []
+    if n_samples <= 0 or n_samples >= len(coords):
+        return coords
+    step = max(1, len(coords) // n_samples)
+    return coords[::step][:n_samples]
+
+
 def make_boundary_refine_points(
     M: np.ndarray,
     allowed_box: Box,
@@ -781,14 +881,21 @@ def sculpting_pipeline(
             iter_max_points = min(iter_max_points, cfg.first_iter_max_points)
 
         if cfg.boundary_refine_only and it >= 1:
-            # 在边界带生成点
-            Ppos, Pneg = make_boundary_refine_points(
+            # 在边界带生成点（语义引导）
+            Ppos, Pneg = make_boundary_semantic_points(
+                image,
                 (M & allowed_mask).astype(np.uint8),
+                allowed_mask,
                 allowed_box,
+                scorer,
+                instance_text,
                 max_total=iter_max_points,
                 pos_neg_ratio=cfg.pos_neg_ratio,
-                boundary_band_out=cfg.boundary_band,
-                boundary_band_in=cfg.boundary_inner_band,
+                band_out=cfg.boundary_band,
+                band_in=cfg.boundary_inner_band,
+                r_out=cfg.boundary_alpha_radius_out,
+                r_in=cfg.boundary_alpha_radius_in,
+                n_samples=cfg.boundary_samples,
             )
             # 调试输出
             if debug_hook is not None:
