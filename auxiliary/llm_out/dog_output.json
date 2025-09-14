@@ -1,0 +1,6 @@
+{
+"instance": "camouflaged dog",
+"ids_line_vertical": [3,4,5,6,7,8],
+"ids_line_horizontal": [3,4,5,6,7,8,9],
+"reason": "The object referred to is a small brown dog camouflaged in the similarly colored dog bed. Its nose, face, and part of the body can be detected in the lower central region of the bed. These features overlap vertical segments 5–8 and horizontal segments 6–9."
+}

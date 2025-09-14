@@ -1,76 +1,76 @@
 {
   "pos_points": [
     {
-      "y": 603,
-      "x": 1245,
+      "y": 214,
+      "x": 988,
       "is_positive": true,
       "score": 1.0
     },
     {
-      "y": 605,
-      "x": 1256,
+      "y": 214,
+      "x": 1388,
       "is_positive": true,
       "score": 1.0
     },
     {
-      "y": 611,
-      "x": 1236,
+      "y": 214,
+      "x": 1790,
       "is_positive": true,
       "score": 1.0
     },
     {
-      "y": 615,
-      "x": 1268,
+      "y": 214,
+      "x": 2192,
       "is_positive": true,
       "score": 1.0
     },
     {
-      "y": 623,
-      "x": 1271,
+      "y": 261,
+      "x": 859,
       "is_positive": true,
       "score": 1.0
     },
     {
-      "y": 631,
-      "x": 1272,
+      "y": 313,
+      "x": 737,
       "is_positive": true,
       "score": 1.0
     },
     {
-      "y": 641,
-      "x": 1227,
+      "y": 375,
+      "x": 628,
       "is_positive": true,
       "score": 1.0
     },
     {
-      "y": 651,
-      "x": 1228,
+      "y": 441,
+      "x": 532,
       "is_positive": true,
       "score": 1.0
     }
   ],
   "neg_points": [
     {
-      "y": 602,
-      "x": 1244,
+      "y": 213,
+      "x": 988,
       "is_positive": false,
       "score": 1.0
     },
     {
-      "y": 604,
-      "x": 1256,
+      "y": 213,
+      "x": 2198,
       "is_positive": false,
       "score": 1.0
     },
     {
-      "y": 610,
-      "x": 1235,
+      "y": 260,
+      "x": 857,
       "is_positive": false,
       "score": 1.0
     },
     {
-      "y": 615,
-      "x": 1269,
+      "y": 311,
+      "x": 739,
       "is_positive": false,
       "score": 1.0
     }

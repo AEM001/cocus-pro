@@ -59,6 +59,12 @@ class Config:
     fine_min_cell: int = 12
     fine_max_depth: int = 3
 
+    # 边界精修模式（仅在边界带生成正负点，不进行全局网格打分）
+    boundary_refine_only: bool = True
+    skip_update_first_iter: bool = True
+    boundary_samples: int = 24
+    boundary_inner_band: int = 6
+
     prompt_template: str = "a photo of the {instance} camouflaged in the background."
 
     image_path: Optional[str] = None
@@ -440,6 +446,93 @@ def _nearest_outside(mask01: np.ndarray, y: int, x: int, band: int, limit_box: O
     return None
 
 
+def _nearest_inside(mask01: np.ndarray, y: int, x: int, band: int, limit_box: Optional[Box] = None) -> Optional[Tuple[int, int]]:
+    """从 (y,x) 周围向内扩展 band，找到最近的前景像素坐标（用于正点）
+
+    若提供 limit_box，则搜索窗口始终限制在该 box 范围内。
+    """
+    H, W = mask01.shape
+    for r in range(1, band + 1):
+        y0, y1 = max(0, y - r), min(H, y + r + 1)
+        x0, x1 = max(0, x - r), min(W, x + r + 1)
+        if limit_box is not None:
+            y0 = max(y0, limit_box.r0); y1 = min(y1, limit_box.r1)
+            x0 = max(x0, limit_box.c0); x1 = min(x1, limit_box.c1)
+            if y0 >= y1 or x0 >= x1:
+                continue
+        sub = mask01[y0:y1, x0:x1]
+        ys, xs = np.where(sub == 1)
+        if len(xs) > 0:
+            return int(y0 + ys[len(xs) // 2]), int(x0 + xs[len(xs) // 2])
+    return None
+    """从 (y,x) 周围向外扩展 band，找到最近的背景像素坐标（用于负点）
+
+    若提供 limit_box，则搜索窗口始终限制在该 box 范围内。
+    """
+    H, W = mask01.shape
+    for r in range(1, band + 1):
+        y0, y1 = max(0, y - r), min(H, y + r + 1)
+        x0, x1 = max(0, x - r), min(W, x + r + 1)
+        if limit_box is not None:
+            y0 = max(y0, limit_box.r0); y1 = min(y1, limit_box.r1)
+            x0 = max(x0, limit_box.c0); x1 = min(x1, limit_box.c1)
+            if y0 >= y1 or x0 >= x1:
+                continue
+        sub = mask01[y0:y1, x0:x1]
+        ys, xs = np.where(sub == 0)
+        if len(xs) > 0:
+            return int(y0 + ys[len(xs) // 2]), int(x0 + xs[len(xs) // 2])
+    return None
+
+
+def _sample_boundary_points(M: np.ndarray, allowed_box: Box, n_samples: int) -> List[Tuple[int, int]]:
+    """均匀采样边界点（限制在 allowed_box 内）"""
+    boundary = _boundary_mask(M)
+    bys, bxs = np.where(boundary > 0)
+    coords = [(int(y), int(x)) for y, x in zip(bys.tolist(), bxs.tolist())
+              if (allowed_box.r0 <= y < allowed_box.r1 and allowed_box.c0 <= x < allowed_box.c1)]
+    if not coords:
+        return []
+    if n_samples <= 0 or n_samples >= len(coords):
+        return coords
+    step = max(1, len(coords) // n_samples)
+    return coords[::step][:n_samples]
+
+
+def make_boundary_refine_points(
+    M: np.ndarray,
+    allowed_box: Box,
+    max_total: int,
+    pos_neg_ratio: float,
+    boundary_band_out: int,
+    boundary_band_in: int,
+) -> Tuple[List[Point], List[Point]]:
+    """在当前掩码边界附近生成正/负点对，用于细修边界"""
+    pos_pts: List[Point] = []
+    neg_pts: List[Point] = []
+    max_pos = int(max_total * pos_neg_ratio / (1.0 + pos_neg_ratio))
+    max_neg = max_total - max_pos
+
+    # 采样边界点
+    cand = _sample_boundary_points(M, allowed_box, n_samples=max_total * 4)
+    if not cand:
+        return pos_pts, neg_pts
+
+    for (y, x) in cand:
+        if len(pos_pts) < max_pos:
+            inside = _nearest_inside(M, y, x, boundary_band_in, limit_box=allowed_box)
+            if inside is not None and M[inside[0], inside[1]] == 1:
+                pos_pts.append(Point(inside[0], inside[1], True, score=1.0))
+        if len(neg_pts) < max_neg:
+            outside = _nearest_outside(M, y, x, boundary_band_out, limit_box=allowed_box)
+            if outside is not None and M[outside[0], outside[1]] == 0:
+                neg_pts.append(Point(outside[0], outside[1], False, score=1.0))
+        if len(pos_pts) >= max_pos and len(neg_pts) >= max_neg:
+            break
+
+    return pos_pts, neg_pts
+
+
 def select_points_from_cells(
     M: np.ndarray,
     pos_cells: List[Cell],
@@ -679,6 +772,51 @@ def sculpting_pipeline(
             x1, y1, x2, y2 = tight_xyxy
             work_bbox = box_from_xyxy_clip(y1, x1, y2, x2, H, W)
 
+        # 若采用边界精修模式，并且不是首轮，则直接从边界生成点，跳过全局网格打分
+        # 先计算本轮最大点数（小ROI或首轮时进一步收紧）
+        iter_max_points = cfg.max_points_per_iter
+        if roi_ratio <= cfg.small_roi_ratio:
+            iter_max_points = min(iter_max_points, cfg.small_roi_max_points)
+        if it == 0 and cfg.gentle_first_iter:
+            iter_max_points = min(iter_max_points, cfg.first_iter_max_points)
+
+        if cfg.boundary_refine_only and it >= 1:
+            # 在边界带生成点
+            Ppos, Pneg = make_boundary_refine_points(
+                (M & allowed_mask).astype(np.uint8),
+                allowed_box,
+                max_total=iter_max_points,
+                pos_neg_ratio=cfg.pos_neg_ratio,
+                boundary_band_out=cfg.boundary_band,
+                boundary_band_in=cfg.boundary_inner_band,
+            )
+            # 调试输出
+            if debug_hook is not None:
+                try:
+                    debug_hook(
+                        it=it,
+                        cells=[],
+                        pos_cells=[],
+                        neg_cells=[],
+                        pos_points=Ppos,
+                        neg_points=Pneg,
+                        mask=(M & allowed_mask).astype(np.uint8),
+                    )
+                except Exception:
+                    pass
+            # 若首轮需要跳过更新（保留初始效果好），则不做 SAM 更新
+            # 此处 it>=1，不受 skip_update_first_iter 影响
+            if (len(Ppos) + len(Pneg)) == 0:
+                break
+            M_new = (sam.predict_points(image, Ppos, Pneg) > 0).astype(np.uint8)
+            if cfg.gate_mask_outside_roi:
+                M_new = (M_new & allowed_mask).astype(np.uint8)
+            M_new = smooth_mask(M_new)
+            if iou(M_new, M) > (1.0 - cfg.iou_eps):
+                break
+            M = M_new
+            continue
+
         # 1) 初始网格：将 work_bbox 按 grid_this_iter 划为多个叶子单元
         leaf_cells: List[Cell] = partition_grid(work_bbox, grid_this_iter)
 
@@ -746,11 +884,15 @@ def sculpting_pipeline(
             allow_neg = (sigma >= cfg.min_sigma_for_neg)
 
         # 本轮最大点数（小ROI或首轮时进一步收紧）
-        iter_max_points = cfg.max_points_per_iter
-        if roi_ratio <= cfg.small_roi_ratio:
-            iter_max_points = min(iter_max_points, cfg.small_roi_max_points)
-        if it == 0 and cfg.gentle_first_iter:
-            iter_max_points = min(iter_max_points, cfg.first_iter_max_points)
+        # 注意：iter_max_points 已在上文 boundary_refine_only 分支前计算过，为避免重复，这里若未定义则计算
+        try:
+            iter_max_points
+        except NameError:
+            iter_max_points = cfg.max_points_per_iter
+            if roi_ratio <= cfg.small_roi_ratio:
+                iter_max_points = min(iter_max_points, cfg.small_roi_max_points)
+            if it == 0 and cfg.gentle_first_iter:
+                iter_max_points = min(iter_max_points, cfg.first_iter_max_points)
 
         # 计算允许点生成的区域（初始 ROI 的轻度扩张）
         allowed_box = expand_box_scale(bbox, cfg.roi_point_expand_scale, H, W)
@@ -778,6 +920,9 @@ def sculpting_pipeline(
                 )
             except Exception:
                 pass
+        # 首轮如需跳过更新（保留初始 SAM 效果），则直接进入下一轮
+        if cfg.boundary_refine_only and it == 0 and cfg.skip_update_first_iter:
+            continue
         # 若本轮没有可用点，提前终止
         if (len(Ppos) + len(Pneg)) == 0:
             break
