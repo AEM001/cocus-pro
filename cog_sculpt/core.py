@@ -1,3 +1,7 @@
+"""
+实现“语义雕刻 + SAM”的核心流程，包括网格划分、
+区域语义评分、正负点选择、SAM 交互细化与迭代早停。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +18,13 @@ from PIL import Image
 
 @dataclass
 class Config:
+    """管线配置项
+
+    - 网格与细分：控制初始网格大小、最小单元、最大细分深度
+    - 迭代策略：控制每轮点数、正负比例、早停阈值、边界带宽
+    - 提示词模板：区域语义评分所用的文本模板（支持 format(instance=...)）
+    - 数据与输出：输入路径与输出目录，以及是否使用先验/box
+    """
     v_segments: int = 9
     h_segments: int = 9
 
@@ -43,6 +54,7 @@ class Config:
 
 @dataclass
 class Box:
+    """行列坐标系下的矩形框，闭开区间 [r0:r1, c0:c1]"""
     r0: int
     c0: int
     r1: int
@@ -51,6 +63,12 @@ class Box:
 
 @dataclass
 class Point:
+    """用于 SAM 交互的点提示
+
+    - y, x: 点的像素坐标（行, 列）
+    - is_positive: True 表示正点，False 表示负点
+    - score: 该点来自的单元格语义分数（用于调试或加权）
+    """
     y: int
     x: int
     is_positive: bool
@@ -59,6 +77,12 @@ class Point:
 
 @dataclass
 class Cell:
+    """网格单元
+
+    - box: 单元格在整图中的位置
+    - depth: 细分深度（0 为初始层）
+    - score: 该单元的语义评分（None 表示尚未评分）
+    """
     box: Box
     depth: int = 0
     score: Optional[float] = None
@@ -70,25 +94,30 @@ class Cell:
 
 
 def load_image(path: str) -> np.ndarray:
+    """读取图像为 RGB numpy 数组 [H, W, 3]"""
     return np.asarray(Image.open(path).convert("RGB"))
 
 
 def load_mask_png(path: str) -> np.ndarray:
+    """读取灰度 PNG 掩码，并二值化为 {0,1} 的 uint8 数组"""
     arr = np.asarray(Image.open(path).convert("L"))
     return (arr > 127).astype(np.uint8)
 
 
 def save_mask_png(mask01: np.ndarray, path: str) -> None:
+    """将 {0,1} 掩码保存为 PNG（0/255）"""
     Image.fromarray((mask01.astype(np.uint8) * 255)).save(path)
 
 
 def ensure_dir(path: str) -> None:
+    """确保目录存在（若不存在则创建）"""
     import os
 
     os.makedirs(path, exist_ok=True)
 
 
 def read_json(path: str) -> Dict[str, Any]:
+    """读取 JSON 文件为字典"""
     import json
 
     with open(path, "r", encoding="utf-8") as f:
@@ -96,6 +125,11 @@ def read_json(path: str) -> Dict[str, Any]:
 
 
 def maybe_read_boxes(path: Optional[str]) -> Optional[np.ndarray]:
+    """读取候选框 JSON（若路径无效或无 boxes 字段则返回 None）
+
+    期望 JSON 结构：{"boxes": [[x1,y1,x2,y2], ...]}
+    返回：np.ndarray[int32] 或 None
+    """
     import os
 
     if not path or not os.path.isfile(path):
@@ -108,6 +142,10 @@ def maybe_read_boxes(path: Optional[str]) -> Optional[np.ndarray]:
 
 
 def bbox_from_mask(mask01: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    """从二值掩码中估计紧致外接框，返回 (x_min, y_min, x_max, y_max)
+
+    若掩码为空返回 None
+    """
     ys, xs = np.where(mask01 > 0)
     if len(xs) == 0:
         return None
@@ -115,6 +153,7 @@ def bbox_from_mask(mask01: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
 
 
 def overlay(image: np.ndarray, mask01: np.ndarray, color=(0, 255, 0), alpha: float = 0.4) -> np.ndarray:
+    """将掩码渲染到图像上（半透明叠加）"""
     out = image.copy().astype(np.uint8)
     m = (mask01 > 0)
     out[m] = ((1 - alpha) * out[m] + alpha * np.array(color)).astype(np.uint8)
@@ -122,6 +161,7 @@ def overlay(image: np.ndarray, mask01: np.ndarray, color=(0, 255, 0), alpha: flo
 
 
 def save_image(arr: np.ndarray, path: str) -> None:
+    """保存 numpy 数组为图像文件"""
     Image.fromarray(arr).save(path)
 
 
@@ -131,6 +171,7 @@ def save_image(arr: np.ndarray, path: str) -> None:
 
 
 def roi_to_bbox(ids_v, ids_h, H: int, W: int, v_segments: int, h_segments: int, margin: float) -> Box:
+    """从网格索引集恢复 ROI 框，并按 margin 扩张一定比例"""
     r0 = int((min(ids_v) - 1) * (H / v_segments))
     r1 = int(max(ids_v) * (H / v_segments))
     c0 = int((min(ids_h) - 1) * (W / h_segments))
@@ -143,6 +184,7 @@ def roi_to_bbox(ids_v, ids_h, H: int, W: int, v_segments: int, h_segments: int, 
 
 
 def box_from_xyxy_clip(y1: int, x1: int, y2: int, x2: int, H: int, W: int) -> Box:
+    """将任意 (y1,x1,y2,x2) 裁剪到图像范围内并确保顺序合法"""
     y1 = max(0, min(H, y1)); y2 = max(0, min(H, y2))
     x1 = max(0, min(W, x1)); x2 = max(0, min(W, x2))
     if y2 < y1:
@@ -153,6 +195,7 @@ def box_from_xyxy_clip(y1: int, x1: int, y2: int, x2: int, H: int, W: int) -> Bo
 
 
 def partition_grid(bbox: Box, grid: Tuple[int, int]) -> List[Cell]:
+    """将 bbox 均匀划分为 grid=(gh,gw) 个单元格，返回 Cell 列表（初始 depth=0）"""
     r0, c0, r1, c1 = bbox.r0, bbox.c0, bbox.r1, bbox.c1
     gh, gw = grid
     H = r1 - r0; W = c1 - c0
@@ -168,6 +211,7 @@ def partition_grid(bbox: Box, grid: Tuple[int, int]) -> List[Cell]:
 
 
 def subdivide_cell(cell: Cell) -> List[Cell]:
+    """将单元格四分细化，子格 depth = 父格 depth + 1"""
     b = cell.box
     rm = (b.r0 + b.r1) // 2
     cm = (b.c0 + b.c1) // 2
@@ -180,6 +224,7 @@ def subdivide_cell(cell: Cell) -> List[Cell]:
 
 
 def build_alpha_for_cell(M: np.ndarray, cell: Cell) -> np.ndarray:
+    """从整体掩码 M 中截取当前 Cell 区域，构造局部 alpha（float32, 与 M 同形状）"""
     alpha = np.zeros_like(M, dtype=np.float32)
     b = cell.box
     alpha[b.r0:b.r1, b.c0:b.c1] = M[b.r0:b.r1, b.c0:b.c1]
@@ -187,6 +232,7 @@ def build_alpha_for_cell(M: np.ndarray, cell: Cell) -> np.ndarray:
 
 
 def compose_rgba(image: np.ndarray, alpha01: np.ndarray) -> np.ndarray:
+    """将 RGB 图与 {0,1} 或 [0,255] 掩码合并为 RGBA（用于可视化/调试）"""
     a = (alpha01 * 255).astype(np.uint8) if alpha01.dtype != np.uint8 else alpha01
     return np.dstack([image, a])
 
@@ -197,6 +243,7 @@ def compose_rgba(image: np.ndarray, alpha01: np.ndarray) -> np.ndarray:
 
 
 def _cell_size(cell: Cell) -> Tuple[int, int]:
+    """返回单元格的 (高, 宽)"""
     b = cell.box
     return (b.r1 - b.r0, b.c1 - b.c0)
 
@@ -207,16 +254,23 @@ def _cell_size(cell: Cell) -> Tuple[int, int]:
 
 
 class RegionScorer:
+    """区域评分抽象接口：给定图像与区域 alpha，输出该区域对给定文本的语义分数"""
     def score(self, image: np.ndarray, alpha01: np.ndarray, text: str) -> float:
         raise NotImplementedError
 
 
 class AlphaCLIPScorer(RegionScorer):
+    """使用 Alpha-CLIP 进行区域语义评分（支持多模板提示并聚合）"""
     def __init__(self, model) -> None:
         self.model = model
 
     def score(self, image: np.ndarray, alpha01: np.ndarray, text: str) -> float:
-        """使用Alpha-CLIP进行区域语义评分"""
+        """使用 Alpha-CLIP 进行区域语义评分
+
+        - image: RGB 图像
+        - alpha01: 当前单元对应的软掩码（0/1 或 [0,1]）
+        - text: 已经格式化后的提示文本
+        """
         try:
             score = self.model.score_region_with_templates(
                 image, alpha01, text,
@@ -234,11 +288,12 @@ class AlphaCLIPScorer(RegionScorer):
 
 
 class SoftFocusCLIPScorer(RegionScorer):
+    """不使用 Alpha-CLIP 的替代评分器：对图像进行软加权后走标准 RGB 编码"""
     def __init__(self, model) -> None:
         self.model = model
 
     def score(self, image: np.ndarray, alpha01: np.ndarray, text: str) -> float:
-        """使用软聚焦方法进行区域评分(非Alpha-CLIP的替代方案)"""
+        """使用软聚焦方法进行区域评分（非 Alpha-CLIP 的替代方案）"""
         try:
             # 软聚焦: I' = I * (0.5 + 0.5 * alpha)
             soft_focused = (image.astype(np.float32) * (0.5 + 0.5 * alpha01[..., None])).astype(np.uint8)
@@ -255,10 +310,12 @@ class SoftFocusCLIPScorer(RegionScorer):
 
 
 class DensityScorer(RegionScorer):
+    """简单基线：以区域面积占比作为分数"""
     def __init__(self, eps: float = 1e-6) -> None:
         self.eps = eps
 
     def score(self, image: np.ndarray, alpha01: np.ndarray, text: str) -> float:
+        """返回 alpha 区域像素占比（与文本无关）"""
         s = float((alpha01 > 0).sum())
         area = float(alpha01.size) + self.eps
         return s / area
@@ -270,6 +327,7 @@ class DensityScorer(RegionScorer):
 
 
 def _centroid_of_mask(mask01: np.ndarray) -> Optional[Tuple[int, int]]:
+    """返回掩码的中位数质心 (y,x)，若掩码为空返回 None"""
     ys, xs = np.where(mask01 > 0)
     if len(xs) == 0:
         return None
@@ -277,6 +335,7 @@ def _centroid_of_mask(mask01: np.ndarray) -> Optional[Tuple[int, int]]:
 
 
 def _boundary_mask(mask01: np.ndarray) -> np.ndarray:
+    """简单的边缘检测，返回边界像素的二值图"""
     k = np.array([[1, 1, 1], [1, -8, 1], [1, 1, 1]], dtype=np.int32)
     pad = np.pad(mask01.astype(np.int32), 1, mode="edge")
     H, W = mask01.shape
@@ -288,6 +347,7 @@ def _boundary_mask(mask01: np.ndarray) -> np.ndarray:
 
 
 def _nearest_outside(mask01: np.ndarray, y: int, x: int, band: int) -> Optional[Tuple[int, int]]:
+    """从 (y,x) 周围向外扩展 band，找到最近的背景像素坐标（用于负点）"""
     H, W = mask01.shape
     for r in range(1, band + 1):
         y0, y1 = max(0, y - r), min(H, y + r + 1)
@@ -307,10 +367,18 @@ def select_points_from_cells(
     pos_neg_ratio: float,
     boundary_band: int,
 ) -> Tuple[List[Point], List[Point]]:
+    """根据正/负单元格从掩码中选择用于 SAM 的点提示
+
+    策略：
+    - 正点：在单元格内部取掩码的中位数质心
+    - 负点：在单元格内的边界上，向外最近位置取一个背景点
+    - 数量：受 max_total 与 pos_neg_ratio 控制
+    """
     pos_pts: List[Point] = []
     neg_pts: List[Point] = []
     max_pos = int(max_total * pos_neg_ratio / (1.0 + pos_neg_ratio))
     max_neg = max_total - max_pos
+    # 为每个正格挑选一个质心点
     for c in pos_cells:
         b = c.box
         sub = M[b.r0:b.r1, b.c0:b.c1]
@@ -321,9 +389,11 @@ def select_points_from_cells(
             pos_pts.append(Point(y, x, True, score=float(c.score or 0.0)))
         if len(pos_pts) >= max_pos:
             break
+    # 预先计算整个掩码的边界像素集合
     boundary = _boundary_mask(M)
     bys, bxs = np.where(boundary > 0)
     bcoords = list(zip(bys.tolist(), bxs.tolist()))
+    # 为每个负格在其内部找到边界点，向外扩散寻找最近的背景点
     for c in neg_cells:
         b = c.box
         cand = [(y, x) for (y, x) in bcoords if (b.r0 <= y < b.r1 and b.c0 <= x < b.c1)]
@@ -344,6 +414,7 @@ def select_points_from_cells(
 
 
 def iou(a01: np.ndarray, b01: np.ndarray) -> float:
+    """计算两个二值掩码的 IoU（加入极小平滑项避免除零）"""
     a = a01 > 0
     b = b01 > 0
     inter = float(np.logical_and(a, b).sum())
@@ -352,6 +423,7 @@ def iou(a01: np.ndarray, b01: np.ndarray) -> float:
 
 
 def smooth_mask(M01: np.ndarray) -> np.ndarray:
+    """对二值掩码做 3x3 多数投票平滑，去除毛刺/小孔"""
     M = (M01 > 0).astype(np.uint8)
     pad = np.pad(M, 1, mode="edge")
     H, W = M.shape
@@ -376,7 +448,11 @@ class SamWrapper:
         self._current_image = None
 
     def predict_box(self, image: np.ndarray, bbox: Box) -> np.ndarray:
-        """使用边界框预测掩码"""
+        """使用边界框预测掩码
+
+        - 确保先设置图像（避免多次重复 set_image）
+        - 将 Box(r0,c0,r1,c1) 转为 SAM 接口所需的 [x1,y1,x2,y2]
+        """
         if self.sam_wrapper is None:
             raise NotImplementedError("请提供真实的SAM实现")
         
@@ -390,7 +466,12 @@ class SamWrapper:
         return self.sam_wrapper.predict_with_box(box_list)
 
     def predict_points(self, image: np.ndarray, pos: List[Point], neg: List[Point]) -> np.ndarray:
-        """使用点提示预测掩码"""
+        """使用点提示预测掩码
+
+        - 正点 label=1，负点 label=0
+        - 输入点的坐标为 (y,x)，SAM 需要 (x,y)，内部会转换
+        - 若没有点，则返回全零掩码
+        """
         if self.sam_wrapper is None:
             raise NotImplementedError("请提供真实的SAM实现")
         
@@ -427,6 +508,7 @@ class SamWrapper:
 
 
 def threshold_cells(cells: List[Cell]) -> Tuple[List[Cell], List[Cell], List[Cell]]:
+    """基于 μ±0.5σ 自适应阈分，将单元格划为 正/负/不确定 三类"""
     scores = np.array([float(c.score) for c in cells if c.score is not None], dtype=np.float32)
     mu = float(scores.mean()) if scores.size else 0.0
     sigma = float(scores.std()) if scores.size else 1.0
@@ -456,29 +538,42 @@ def sculpting_pipeline(
     initial_mask_M0: Optional[np.ndarray] = None,
     debug_hook: Optional[Callable[..., None]] = None,
 ) -> np.ndarray:
+    """主流程：语义雕刻 + SAM 交互迭代，输出最终掩码
+
+    参数：
+    - image: 输入 RGB 图像
+    - bbox: 处理的 ROI 区域
+    - instance_text: 实例类别文本（将被 format 到 cfg.prompt_template 中）
+    - sam: SAM 包装器（需提供 set_image / predict 接口）
+    - scorer: 区域语义评分器（如 AlphaCLIPScorer）
+    - cfg: 管线配置
+    - initial_mask_M0: 初始掩码（若为 None 则用 bbox 初始化）
+    - debug_hook: 可选调试回调，观察每轮状态
+    """
     if initial_mask_M0 is not None:
         M = (initial_mask_M0 > 0).astype(np.uint8)
     else:
+        # 步骤0：若没有初始掩码，则使用 SAM 的框预测作为 M0
         M = (sam.predict_box(image, bbox) > 0).astype(np.uint8)
     M = smooth_mask(M)
 
     for it in range(cfg.k_iters):
-        # 1) 初始网格
+        # 1) 初始网格：将 bbox 按 cfg.grid_init 划为多个叶子单元
         leaf_cells: List[Cell] = partition_grid(bbox, cfg.grid_init)
 
         # 2) 递归细分：仅对不确定单元格，且尺寸 >= min_cell，深度 < max_depth
         while True:
-            # 给当前叶子全部打分
+            # 2.1) 给当前所有叶子打分（基于当前 M 构建 alpha）
             prompt = cfg.prompt_template.format(instance=instance_text)
             for c in leaf_cells:
                 if c.score is None:
                     alpha = build_alpha_for_cell(M, c)
                     c.score = float(scorer.score(image, alpha, prompt))
 
-            # 基于当前叶子阈分
+            # 2.2) 基于当前叶子阈分
             pos_now, neg_now, unc_now = threshold_cells(leaf_cells)
 
-            # 选择需要细分的“不确定格”
+            # 2.3) 选择需要细分的“不确定格”
             to_subdivide: List[Cell] = []
             for c in unc_now:
                 if c.depth >= cfg.max_depth:
@@ -491,7 +586,7 @@ def sculpting_pipeline(
             if not to_subdivide:
                 break
 
-            # 用子格替换父格，子格待评分
+            # 2.4) 用子格替换父格，子格待评分
             new_leaves: List[Cell] = []
             for c in leaf_cells:
                 if c in to_subdivide:
@@ -499,7 +594,7 @@ def sculpting_pipeline(
                 else:
                     new_leaves.append(c)
             leaf_cells = new_leaves
-            # 将新加入的子格 score 置空，避免复用父格分数
+            # 2.5) 将新加入的子格 score 置空，避免复用父格分数
             for c in leaf_cells:
                 if c.depth > 0 and c.score is None:
                     pass  # 明确保留 None，下一轮会评分
@@ -527,13 +622,16 @@ def sculpting_pipeline(
                 )
             except Exception:
                 pass
+        # 若本轮没有可用点，提前终止
         if (len(Ppos) + len(Pneg)) == 0:
             break
+        # 4) 使用 SAM 点提示进行掩码细化
         M_new = (sam.predict_points(image, Ppos, Pneg) > 0).astype(np.uint8)
         M_new = smooth_mask(M_new)
-        # 4) 早停：若两次掩码非常相似（IoU 足够高），则停止
+        # 5) 早停：若两次掩码非常相似（IoU 足够高），则停止
         if iou(M_new, M) > (1.0 - cfg.iou_eps):
             break
+        # 6) 否则更新掩码并进入下一轮
         M = M_new
 
     return M
