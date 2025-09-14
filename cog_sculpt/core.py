@@ -45,14 +45,19 @@ class Config:
 
     # 点提示的 ROI 约束（仅允许在初始 ROI 的轻度扩张区域内生成点）
     roi_point_expand_scale: float = 1.2
+    gate_mask_outside_roi: bool = True  # 将最终掩码与 ROI 扩张区域做硬门控
 
-    # 温和首轮策略（小ROI或首轮减少激进点提示）
+    # 首轮/细粒度策略
     gentle_first_iter: bool = True
     first_iter_max_points: int = 4
     first_iter_disable_subdivide: bool = True
     topk_pos_first_iter: int = 3
     small_roi_ratio: float = 0.06
     small_roi_max_points: int = 6
+    fine_after_first: bool = True
+    fine_grid: Tuple[int, int] = (6, 6)
+    fine_min_cell: int = 12
+    fine_max_depth: int = 3
 
     prompt_template: str = "a photo of the {instance} camouflaged in the background."
 
@@ -433,16 +438,6 @@ def _nearest_outside(mask01: np.ndarray, y: int, x: int, band: int, limit_box: O
         if len(xs) > 0:
             return int(y0 + ys[len(xs) // 2]), int(x0 + xs[len(xs) // 2])
     return None
-    """从 (y,x) 周围向外扩展 band，找到最近的背景像素坐标（用于负点）"""
-    H, W = mask01.shape
-    for r in range(1, band + 1):
-        y0, y1 = max(0, y - r), min(H, y + r + 1)
-        x0, x1 = max(0, x - r), min(W, x + r + 1)
-        sub = mask01[y0:y1, x0:x1]
-        ys, xs = np.where(sub == 0)
-        if len(xs) > 0:
-            return int(y0 + ys[len(xs) // 2]), int(x0 + xs[len(xs) // 2])
-    return None
 
 
 def select_points_from_cells(
@@ -645,27 +640,55 @@ def sculpting_pipeline(
     - initial_mask_M0: 初始掩码（若为 None 则用 bbox 初始化）
     - debug_hook: 可选调试回调，观察每轮状态
     """
+    # 步骤0：无论是否提供 initial_mask_M0，都先用 SAM 的框预测得到 M0_sam
+    M0_sam = (sam.predict_box(image, bbox) > 0).astype(np.uint8)
+    M0_sam = smooth_mask(M0_sam)
+    # 若提供了初始掩码（如 prior），则与 SAM 预测做交集，限制到 prior 指定区域
     if initial_mask_M0 is not None:
-        M = (initial_mask_M0 > 0).astype(np.uint8)
+        prior01 = (initial_mask_M0 > 0).astype(np.uint8)
+        M = (M0_sam & prior01).astype(np.uint8)
     else:
-        # 步骤0：若没有初始掩码，则使用 SAM 的框预测作为 M0
-        M = (sam.predict_box(image, bbox) > 0).astype(np.uint8)
-    M = smooth_mask(M)
+        M = M0_sam
 
     H, W = image.shape[:2]
     roi_area = (bbox.r1 - bbox.r0) * (bbox.c1 - bbox.c0)
     img_area = H * W
     roi_ratio = float(roi_area) / float(img_area + 1e-6)
 
+    # 计算全程固定的“允许点域”（初始 ROI 的轻度扩张）
+    allowed_box = expand_box_scale(bbox, cfg.roi_point_expand_scale, H, W)
+    allowed_mask = np.zeros((H, W), dtype=np.uint8)
+    allowed_mask[allowed_box.r0:allowed_box.r1, allowed_box.c0:allowed_box.c1] = 1
+
     for it in range(cfg.k_iters):
-        # 1) 初始网格：将 bbox 按 cfg.grid_init 划为多个叶子单元
-        leaf_cells: List[Cell] = partition_grid(bbox, cfg.grid_init)
+        # 迭代开始时对当前掩码进行允许域硬门控（防止外溢）
+        if cfg.gate_mask_outside_roi:
+            M = (M & allowed_mask).astype(np.uint8)
+
+        # 选择本轮网格（首轮粗，后续细）
+        grid_this_iter: Tuple[int, int]
+        if it == 0:
+            grid_this_iter = cfg.grid_init
+        else:
+            grid_this_iter = cfg.fine_grid if cfg.fine_after_first else cfg.grid_init
+
+        # 根据当前掩码估计更紧致的工作 bbox
+        work_bbox: Box = bbox
+        tight_xyxy = bbox_from_mask(M)
+        if tight_xyxy is not None:
+            x1, y1, x2, y2 = tight_xyxy
+            work_bbox = box_from_xyxy_clip(y1, x1, y2, x2, H, W)
+
+        # 1) 初始网格：将 work_bbox 按 grid_this_iter 划为多个叶子单元
+        leaf_cells: List[Cell] = partition_grid(work_bbox, grid_this_iter)
 
         # 2) 递归细分：仅对不确定单元格，且尺寸 >= min_cell，深度 < max_depth
         # 根据迭代轮次决定本轮最大细分深度（首轮可禁用细分）
-        max_depth_cur = cfg.max_depth
+        # 本轮细分阈值与深度
+        max_depth_cur = cfg.max_depth if it == 0 else (cfg.fine_max_depth if cfg.fine_after_first else cfg.max_depth)
         if it == 0 and cfg.gentle_first_iter and cfg.first_iter_disable_subdivide:
             max_depth_cur = 0
+        min_cell_cur = cfg.min_cell if it == 0 else (cfg.fine_min_cell if cfg.fine_after_first else cfg.min_cell)
 
         while True:
             # 2.1) 给当前所有叶子打分（基于当前 M 构建 alpha）
@@ -673,7 +696,9 @@ def sculpting_pipeline(
             text_for_score = instance_text
             for c in leaf_cells:
                 if c.score is None:
-                    alpha = build_alpha_for_cell(M, c)
+                    # 使用允许域门控后的掩码进行子区域 alpha 构造
+                    Mg = (M & allowed_mask).astype(np.uint8)
+                    alpha = build_alpha_for_cell(Mg, c)
                     c.score = float(scorer.score(image, alpha, text_for_score))
 
             # 2.2) 基于当前叶子阈分
@@ -685,7 +710,7 @@ def sculpting_pipeline(
                 if c.depth >= max_depth_cur:
                     continue
                 h, w = _cell_size(c)
-                if min(h, w) < cfg.min_cell:
+                if min(h, w) < min_cell_cur:
                     continue
                 to_subdivide.append(c)
 
@@ -731,7 +756,7 @@ def sculpting_pipeline(
         allowed_box = expand_box_scale(bbox, cfg.roi_point_expand_scale, H, W)
 
         Ppos, Pneg = select_points_from_cells(
-            M,
+            (M & allowed_mask).astype(np.uint8),
             pos_cells,
             neg_cells,
             max_total=iter_max_points,
@@ -749,7 +774,7 @@ def sculpting_pipeline(
                     neg_cells=neg_cells,
                     pos_points=Ppos,
                     neg_points=Pneg,
-                    mask=M,
+                    mask=(M & allowed_mask).astype(np.uint8),
                 )
             except Exception:
                 pass
@@ -758,6 +783,9 @@ def sculpting_pipeline(
             break
         # 4) 使用 SAM 点提示进行掩码细化
         M_new = (sam.predict_points(image, Ppos, Pneg) > 0).astype(np.uint8)
+        # 预测后先做允许域硬门控，再平滑
+        if cfg.gate_mask_outside_roi:
+            M_new = (M_new & allowed_mask).astype(np.uint8)
         M_new = smooth_mask(M_new)
         # 5) 早停：若两次掩码非常相似（IoU 足够高），则停止
         if iou(M_new, M) > (1.0 - cfg.iou_eps):
