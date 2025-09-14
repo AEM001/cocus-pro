@@ -123,18 +123,35 @@ def load_config(config_path: Optional[str]) -> Dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _first_existing(paths: list[str]) -> Optional[str]:
+    for p in paths:
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
 def run_region_prompts(args):
     """运行区域提示生成"""
     try:
         from auxiliary.scripts.make_region_prompts import main as make_prompts
         
         # 准备参数
-        # 无需外部配置：按约定从 auxiliary/images/{name}.png 读取
-        img_path = f"auxiliary/images/{args.name}.png"
+        # 选择可用输入图像（带回退）：
+        img_candidates = [
+            f"auxiliary/images/{args.name}.png",
+            f"auxiliary/images/{args.name}.jpg",
+            f"images/{args.name}.png",
+            f"images/{args.name}.jpg",
+        ]
+        img_path = _first_existing(img_candidates)
+        if not img_path:
+            print(f"   ❌ 找不到输入图片，已尝试: {img_candidates}")
+            return
         sys.argv = [
             "make_region_prompts.py",
             "--name", args.name,
             "--image", img_path,
+            "--outdir", "auxiliary/out",
         ]
         
         make_prompts()
@@ -152,12 +169,26 @@ def run_build_prior(args):
         from auxiliary.scripts.build_prior_and_boxes import main as build_prior
         
         # 准备参数
-        # 无需外部配置：按约定从 auxiliary/images/{name}.png 读取
-        img_path = f"auxiliary/images/{args.name}.png"
+        # 选择可用输入图像（带回退）
+        img_candidates = [
+            f"auxiliary/images/{args.name}.png",
+            f"auxiliary/images/{args.name}.jpg",
+            f"images/{args.name}.png",
+            f"images/{args.name}.jpg",
+        ]
+        img_path = _first_existing(img_candidates)
+        if not img_path:
+            print(f"   ❌ 找不到输入图片，已尝试: {img_candidates}")
+            return
+        meta_path = f"auxiliary/out/{args.name}/{args.name}_meta.json"
+        pred_path = f"auxiliary/llm_out/{args.name}_output.json"
         sys.argv = [
             "build_prior_and_boxes.py",
             "--name", args.name,
             "--image", img_path,
+            "--meta", meta_path,
+            "--pred", pred_path,
+            "--out", "auxiliary/box_out",
         ]
         
         build_prior()

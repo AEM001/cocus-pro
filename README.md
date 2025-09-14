@@ -1,5 +1,9 @@
 # 语义引导的迭代雕刻分割（Alpha‑CLIP × SAM）
 
+python -m scripts.main --stage region_prompts --name q
+python -m scripts.main --stage build_prior --name q
+
+
 基于 guide.md 的“ROI → 子格 → 语义打分 → 正/负点 → SAM 迭代”流程，实现 Alpha 通道软先验的语义评分与多轮交互式分割（k≈3）。
 
 ## 核心特性
