@@ -1,45 +1,30 @@
 from __future__ import annotations
+from typing import Dict, Optional
 
-from typing import Dict
+# 简化提示词，仅保留anchor/quadrant两类，并允许注入上下文（instance/reason）
 
-
-# 原有的peval和pgen提示词已删除，只保留新的anchor/quadrant提示词
-
-
-def build_anchor_prompt(instance: str) -> Dict[str, str]:
-    """Prompt to choose which labeled anchor i around the ROI needs refinement.
-
-    The input image contains the ROI rectangle with 8 labeled anchors {i}: 1..8 ordered as:
-      1=top-left corner, 2=top-mid, 3=top-right corner, 4=mid-right,
-      5=bottom-right corner, 6=bottom-mid, 7=bottom-left corner, 8=mid-left.
-    The semi-transparent current mask is overlaid in green.
-    """
-    system = "You are a segmentation inspector. Pick labeled ROI anchor indices to refine. Reply ONLY valid JSON."
-    user = (
-        f"We segment a single target instance: '{instance}'.\n"
-        "You see an image with an ROI rectangle and 8 labeled anchors {i}.\n"
-        "Task: choose 1-3 anchors whose vicinity most needs refinement of the current mask.\n"
-        "Reply JSON only with this schema:\n"
-        "{\n  \"anchors_to_refine\": [ { \"id\": 1-8, \"reason\": \"...\" } ]\n}"
+def build_anchor_prompt(instance: str, global_reason: Optional[str] = None) -> Dict[str, str]:
+    sys_msg = "You are a camouflaged-object segmentation assistant. Reply JSON only."
+    user_msg = (
+        f"Target instance: '{instance}'.\n"
+        "Image shows ROI with 8 labeled anchors around the boundary.\n"
+        "Green = current mask. Camouflaged objects may have weak edges and texture similarity to background.\n"
+        "Focus on boundary inconsistency: missing parts at corners/edges, leaks into background, shape breaks.\n"
+        "Task: pick 1-3 anchor ids most likely to improve the mask.\n"
+        "IMPORTANT: Never return an empty list. If uncertain, output exactly one most promising id.\n"
+        "Return JSON strictly:\n{\"anchors_to_refine\": [ { \"id\": 1-8, \"reason\": \"short justification (no numbers)\" } ]}"
     )
-    return {"system": system, "user": user}
+    return {"system": sys_msg, "user": user_msg}
 
 
-def build_quadrant_prompt(instance: str, anchor_id: int) -> Dict[str, str]:
-    """Prompt to choose quadrant regions and suggest pos/neg points for next SAM.
-
-    The input is a crop around anchor i containing a square divided into 4 labeled regions {j}:
-      j=1: top-left quadrant, j=2: top-right, j=3: bottom-right, j=4: bottom-left.
-    Also include previously chosen anchor id i for context.
-    """
-    system = "You are a segmentation refiner. Suggest where to add positive/negative points. Reply ONLY valid JSON."
-    user = (
-        f"Single target instance: '{instance}'.\n"
-        f"We focus on anchor i={anchor_id}. The square is split into 4 labeled regions {{j}} (1..4).\n"
-        "Mask is shown in green overlay.\n"
-        "Decide in which regions to add POSITIVE points (foreground) and NEGATIVE points (background) to improve SAM next step.\n"
-        "Keep the number of points small (<=2 per type).\n"
-        "Reply JSON only with this schema:\n"
-        "{\n  \"anchor_id\": i,\n  \"edits\": [ { \"region_id\": 1-4, \"action\": \"pos\"|\"neg\", \"why\": \"...\" } ]\n}"
+def build_quadrant_prompt(instance: str, anchor_id: int, global_reason: Optional[str] = None, anchor_reason: Optional[str] = None) -> Dict[str, str]:
+    sys_msg = "You are a camouflaged-object segmentation assistant. Reply JSON only."
+    user_msg = (
+        f"Target instance: '{instance}'.\n"
+        f"Focus anchor id: {anchor_id}.\n"
+        "Square around the anchor is split into 4 labeled regions {1..4}.\n"
+        "Green = current mask. Camouflaged objects: look for subtle shape/texture continuity vs background sand/rock.\n"
+        "Decide where to add points for next SAM: POS (foreground) or NEG (background). Use at most 2 per type.\n"
+        "Return JSON strictly:\n{\"anchor_id\": i, \"edits\": [ { \"region_id\": 1-4, \"action\": \"pos\"|\"neg\", \"why\": \"short justification (no numbers)\" } ]}"
     )
-    return {"system": system, "user": user}
+    return {"system": sys_msg, "user": user_msg}

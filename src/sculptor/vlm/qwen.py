@@ -69,26 +69,113 @@ class QwenVLM(VLMBase):
 
     # -------- 重构后的API，只支持anchor/quadrant指导 --------
 
-    def choose_anchors(self, image_with_anchors_rgb: np.ndarray, instance: str) -> Dict[str, Any]:
-        prompts = build_anchor_prompt(instance)
+    def choose_anchors(self, image_with_anchors_rgb: np.ndarray, instance: str, global_reason: Optional[str] = None) -> Dict[str, Any]:
+        prompts = build_anchor_prompt(instance, global_reason)
         text = self._inference([image_with_anchors_rgb], prompts["system"], prompts["user"])  # type: ignore
+        
+        # DEBUG: Print raw VLM response
+        print(f"[DEBUG] Raw VLM anchor response: '{text}'")
+        print(f"[DEBUG] Response length: {len(text)} chars")
+        
         data = try_parse_json(text)
         anchors = data.get("anchors_to_refine", [])
-        norm = []
-        for it in anchors:
+
+        # Normalize if available
+        norm: list[dict] = []
+        for it in anchors if isinstance(anchors, (list, tuple)) else []:
             try:
                 norm.append({"id": int(it.get("id", 0)), "reason": str(it.get("reason", ""))})
             except Exception:
                 pass
-        return {"anchors_to_refine": norm}
 
-    def quadrant_edits(self, quadrant_crop_rgb: np.ndarray, instance: str, anchor_id: int) -> Dict[str, Any]:
-        prompts = build_quadrant_prompt(instance, anchor_id)
+        # Heuristic salvage if empty
+        if not norm:
+            import re, json as _json
+            print(f"[DEBUG] No anchors parsed from JSON, attempting heuristic salvage...")
+            
+            # Try to fix common truncation issues and parse JSON
+            fixed_text = text.strip()
+            # If JSON starts with markdown code block, extract it
+            if "```json" in fixed_text:
+                json_start = fixed_text.find("{")
+                if json_start >= 0:
+                    fixed_text = fixed_text[json_start:]
+            
+            # Try to fix truncated JSON by adding missing closures
+            if not fixed_text.endswith("}"):
+                # Count braces to see what we're missing
+                open_braces = fixed_text.count("{")
+                close_braces = fixed_text.count("}")
+                open_brackets = fixed_text.count("[")
+                close_brackets = fixed_text.count("]")
+                
+                # Add missing quotes if string is cut off
+                if fixed_text.count('"') % 2 == 1:
+                    fixed_text += '"'
+                
+                # Close arrays and objects as needed
+                while close_brackets < open_brackets:
+                    fixed_text += "]"
+                    close_brackets += 1
+                while close_braces < open_braces:
+                    fixed_text += "}"
+                    close_braces += 1
+                    
+                print(f"[DEBUG] Attempting to fix truncated JSON: '{fixed_text}'")
+                
+                try:
+                    data = _json.loads(fixed_text)
+                    anchors = data.get("anchors_to_refine", [])
+                    for it in anchors if isinstance(anchors, (list, tuple)) else []:
+                        try:
+                            anchor_id = it.get("id", 0)
+                            # Handle string IDs
+                            if isinstance(anchor_id, str):
+                                anchor_id = int(anchor_id)
+                            norm.append({"id": int(anchor_id), "reason": str(it.get("reason", ""))})
+                        except Exception:
+                            pass
+                    print(f"[DEBUG] Fixed and parsed {len(norm)} anchors from truncated JSON")
+                except Exception as e:
+                    print(f"[DEBUG] JSON fix attempt failed: {e}")
+            
+            # Fallback: try to directly capture the list after anchors_to_refine
+            if not norm:
+                m = re.search(r"anchors\s*_?to\s*_?refine\s*:\s*(\[.*?\])", text, re.IGNORECASE | re.DOTALL)
+                if m:
+                    try:
+                        sub = m.group(1)
+                        parsed = _json.loads(sub)
+                        if isinstance(parsed, list):
+                            for it in parsed:
+                                try:
+                                    anchor_id = it.get("id", 0)
+                                    if isinstance(anchor_id, str):
+                                        anchor_id = int(anchor_id)
+                                    norm.append({"id": int(anchor_id), "reason": str(it.get("reason", ""))})
+                                except Exception:
+                                    pass
+                        print(f"[DEBUG] Salvaged {len(norm)} anchors from regex pattern")
+                    except Exception as e:
+                        print(f"[DEBUG] Regex salvage failed: {e}")
+                else:
+                    print(f"[DEBUG] No anchor pattern found in response")
+        
+        print(f"[DEBUG] Final anchors count: {len(norm)}")
+        return {"anchors_to_refine": norm, "raw_text": text}
+
+    def quadrant_edits(self, quadrant_crop_rgb: np.ndarray, instance: str, anchor_id: int, global_reason: Optional[str] = None, anchor_reason: Optional[str] = None) -> Dict[str, Any]:
+        prompts = build_quadrant_prompt(instance, anchor_id, global_reason, anchor_reason)
         text = self._inference([quadrant_crop_rgb], prompts["system"], prompts["user"])  # type: ignore
+        
+        # DEBUG: Print raw VLM response
+        print(f"[DEBUG] Raw VLM quadrant response for anchor {anchor_id}: '{text}'")
+        print(f"[DEBUG] Response length: {len(text)} chars")
+        
         data = try_parse_json(text)
         edits = data.get("edits", [])
         norm = []
-        for it in edits:
+        for it in edits if isinstance(edits, (list, tuple)) else []:
             try:
                 rid = int(it.get("region_id", 0))
                 act = str(it.get("action", ""))
@@ -97,7 +184,60 @@ class QwenVLM(VLMBase):
                     norm.append({"region_id": rid, "action": act, "why": why})
             except Exception:
                 pass
-        return {"anchor_id": int(anchor_id), "edits": norm}
+        
+        # If no edits parsed, try to fix truncated JSON similar to anchor processing
+        if not norm:
+            import re, json as _json
+            print(f"[DEBUG] No edits parsed from JSON, attempting repair for anchor {anchor_id}...")
+            
+            # Try to fix common truncation issues and parse JSON
+            fixed_text = text.strip()
+            # If JSON starts with markdown code block, extract it
+            if "```json" in fixed_text:
+                json_start = fixed_text.find("{")
+                if json_start >= 0:
+                    fixed_text = fixed_text[json_start:]
+            
+            # Try to fix truncated JSON by adding missing closures
+            if not fixed_text.endswith("}"):
+                # Count braces to see what we're missing
+                open_braces = fixed_text.count("{")
+                close_braces = fixed_text.count("}")
+                open_brackets = fixed_text.count("[")
+                close_brackets = fixed_text.count("]")
+                
+                # Add missing quotes if string is cut off
+                if fixed_text.count('"') % 2 == 1:
+                    fixed_text += '"'
+                
+                # Close arrays and objects as needed
+                while close_brackets < open_brackets:
+                    fixed_text += "]"
+                    close_brackets += 1
+                while close_braces < open_braces:
+                    fixed_text += "}"
+                    close_braces += 1
+                    
+                print(f"[DEBUG] Attempting to fix truncated JSON: '{fixed_text}'")
+                
+                try:
+                    data = _json.loads(fixed_text)
+                    edits = data.get("edits", [])
+                    for it in edits if isinstance(edits, (list, tuple)) else []:
+                        try:
+                            rid = int(it.get("region_id", 0))
+                            act = str(it.get("action", ""))
+                            why = str(it.get("why", ""))
+                            if rid in (1, 2, 3, 4) and act in ("pos", "neg"):
+                                norm.append({"region_id": rid, "action": act, "why": why})
+                        except Exception:
+                            pass
+                    print(f"[DEBUG] Fixed and parsed {len(norm)} edits from truncated JSON")
+                except Exception as e:
+                    print(f"[DEBUG] JSON fix attempt failed: {e}")
+        
+        print(f"[DEBUG] Final edits count for anchor {anchor_id}: {len(norm)}")
+        return {"anchor_id": int(anchor_id), "edits": norm, "raw_text": text}
 
     # -------- internal helpers --------
     def _inference(self, images: list[np.ndarray], system: str, user: str) -> str:
@@ -197,6 +337,9 @@ class QwenVLM(VLMBase):
                 generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )[0]
             
+            # Clear GPU cache to free memory for other operations
+            torch.cuda.empty_cache()
+            
             return output_text.strip()
             
         except Exception as e:
@@ -245,4 +388,21 @@ class QwenVLM(VLMBase):
         except Exception as e:
             print(f"[WARN] Failed to load model: {e}")
             self._local_model = None
+    
+    def unload_model(self):
+        """Unload the VLM model to free GPU memory"""
+        if self._model is not None:
+            print(f"[INFO] Unloading VLM model to free GPU memory")
+            del self._model
+            self._model = None
+        if self._processor is not None:
+            del self._processor
+            self._processor = None
+        self._local_model = None
+        # Clear GPU cache
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except ImportError:
+            pass
 

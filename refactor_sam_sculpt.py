@@ -1,21 +1,13 @@
-#!/usr/bin/env python3
-"""
-完全重构的SAM分割脚本
-严格按照用户要求：
-1. 确保初始SAM掩码生成正确
-2. 在ROI框的8个锚点标号，交给VLM选择需要精修的锚点
-3. 对选中锚点创建方形区域，分4个象限标号，VLM指导添加正负点
-4. 运行下一轮SAM分割，迭代优化
-
-删除了所有原始的点生成、边框生成等无关代码
-"""
-
 import os
 import sys
 import json
 import numpy as np
 import cv2
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple
+
+# Runtime env tuning for stability
+os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
 # 添加项目路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -26,7 +18,6 @@ except ImportError:
     print("请安装segment-anything: pip install segment-anything")
     sys.exit(1)
 
-from sculptor.vlm.mock import MockVLM
 from sculptor.vlm.qwen import QwenVLM
 
 
@@ -47,15 +38,25 @@ def _auto_font_and_thickness(base_len: float) -> tuple[float, int]:
     return font_scale, max(2, thickness)
 
 
-def load_sam_model(checkpoint_path: str = "models/sam_vit_h_4b8939.pth", device: str = "cuda"):
+def load_sam_model(checkpoint_path: str = "models/sam_vit_b_01ec64.pth", device: str = "cuda"):
     """加载SAM模型"""
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"SAM模型文件不存在: {checkpoint_path}")
+    
+    # Auto-detect model type from filename
+    if "vit_h" in checkpoint_path:
+        model_type = "vit_h"
+    elif "vit_l" in checkpoint_path:
+        model_type = "vit_l"
+    elif "vit_b" in checkpoint_path:
+        model_type = "vit_b"
+    else:
+        model_type = "vit_b"  # Default to ViT-B if unclear
 
-    sam = sam_model_registry["vit_h"](checkpoint=checkpoint_path)
+    sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
     sam.to(device=device)
     predictor = SamPredictor(sam)
-    print(f"SAM模型加载成功，设备: {device}")
+    print(f"SAM模型加载成功 ({model_type})，设备: {device}")
     return predictor
 
 
@@ -152,7 +153,7 @@ def draw_anchors_on_image(image: np.ndarray, roi_box: ROIBox, mask: np.ndarray) 
 
 def create_quadrant_visualization(image: np.ndarray, anchor_point: Tuple[float, float],
                                 roi_box: ROIBox, mask: np.ndarray, anchor_id: int,
-                                ratio: float = 0.5) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+                                ratio: float = 0.8) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
     """步骤3: 简洁版象限可视化（自适应字号，位置纠正）"""
     # 计算方形区域大小（相对ROI，适中比例）
     roi_width = roi_box.x1 - roi_box.x0
@@ -254,9 +255,30 @@ def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box:
     return clipped_mask
 
 
+def _resize_for_vlm(img: np.ndarray, max_side: int) -> np.ndarray:
+    if max_side <= 0:
+        return img
+    h, w = img.shape[:2]
+    side = max(h, w)
+    if side <= max_side:
+        return img
+    scale = max_side / float(side)
+    new_w, new_h = int(round(w * scale)), int(round(h * scale))
+    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
 def main():
-    # 配置参数
-    sample_name = "f"
+    import argparse
+    ap = argparse.ArgumentParser(description='SAM+Qwen refinement (camouflage-friendly)')
+    ap.add_argument('--name', default='f', help='sample name (e.g., f, dog, q)')
+    ap.add_argument('--qwen_dir', default='/home/albert/code/CV/models/Qwen2.5-VL-3B-Instruct', help='Qwen2.5-VL model dir (3B recommended)')
+    ap.add_argument('--rounds', type=int, default=4, help='refinement rounds')
+    ap.add_argument('--anchors_per_round', type=int, default=2, help='limit anchors per round to save VRAM')
+    ap.add_argument('--ratio', type=float, default=0.8, help='square ratio to ROI short side for quadrant crop')
+    ap.add_argument('--vlm_max_side', type=int, default=720, help='resize long side before sending to VLM (<=0 to disable)')
+    args = ap.parse_args()
+
+    sample_name = args.name
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 输入文件路径
@@ -288,9 +310,10 @@ def main():
     print("加载SAM模型...")
     predictor = load_sam_model()
 
-    # 初始化VLM (使用Mock模式)
-    print("初始化VLM...")
-    vlm = MockVLM()
+    # 初始化VLM (仅Qwen，使用本地AWQ模型)
+    print("初始化VLM (Qwen)...")
+    qwen_dir = args.qwen_dir or os.environ.get('QWEN_VL_MODEL_DIR', os.path.join(base_dir, 'models', 'Qwen2.5-VL-3B-Instruct'))
+    vlm = QwenVLM(mode='local', model_dir=qwen_dir, gen_max_new_tokens=128, do_sample=False)
 
     # 步骤1: 生成初始SAM掩码
     print("步骤1: 生成初始SAM掩码...")
@@ -298,7 +321,7 @@ def main():
     save_image(os.path.join(output_dir, 'step1_initial_mask.png'), current_mask)
 
     # 迭代优化
-    max_rounds = 2
+    max_rounds = int(args.rounds)
     for round_idx in range(max_rounds):
         print(f"\n=== 第 {round_idx + 1} 轮优化 ===")
 
@@ -307,13 +330,21 @@ def main():
         anchor_vis = draw_anchors_on_image(image, roi_box, current_mask)
         save_image(os.path.join(output_dir, f'step2_round{round_idx + 1}_anchors.png'), anchor_vis)
 
-        # VLM选择锚点
-        anchor_response = vlm.choose_anchors(anchor_vis, instance_name)
+        # 传给VLM前缩放，降低显存压力
+        anchor_vis_vlm = _resize_for_vlm(anchor_vis, int(args.vlm_max_side))
+        anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name)
         selected_anchors = anchor_response.get('anchors_to_refine', [])
+        # 限制每轮最多处理的锚点数量
+        k = max(1, int(args.anchors_per_round))
+        selected_anchors = selected_anchors[:k]
 
+        # Fallback: if VLM returns no anchors, use a default anchor to keep pipeline going
         if not selected_anchors:
-            print("VLM未选择任何锚点，结束优化")
-            break
+            print("[WARN] VLM未选择任何锚点，使用fallback策略选择锚点1")
+            print(f"[DEBUG] VLM原始响应: '{anchor_response.get('raw_text', 'N/A')}'")
+            fallback_anchor = {"id": 1, "reason": "fallback selection when VLM returned empty"}
+            selected_anchors = [fallback_anchor]
+            print(f"[INFO] 使用fallback锚点: {selected_anchors}")
 
         print(f"VLM选择的锚点: {selected_anchors}")
 
@@ -329,15 +360,16 @@ def main():
 
             anchor_point = anchor_points[anchor_id - 1]
 
-            # 步骤3: 创建象限可视化
+            # 步骤3: 创建象限可视化vlm_max_side
             print(f"步骤3: 为锚点 {anchor_id} 创建象限...")
             quad_vis, square_bounds = create_quadrant_visualization(
-                image, anchor_point, roi_box, current_mask, anchor_id
+                image, anchor_point, roi_box, current_mask, anchor_id, ratio=float(args.ratio)
             )
             save_image(os.path.join(output_dir, f'step3_round{round_idx + 1}_anchor{anchor_id}_quadrants.png'), quad_vis)
 
-            # VLM指导象限编辑
-            quad_response = vlm.quadrant_edits(quad_vis, instance_name, anchor_id)
+            # 传给VLM前缩放
+            quad_vis_vlm = _resize_for_vlm(quad_vis, int(args.vlm_max_side))
+            quad_response = vlm.quadrant_edits(quad_vis_vlm, instance_name, anchor_id)
             edits = quad_response.get('edits', [])
 
             print(f"锚点 {anchor_id} 的编辑指令: {edits}")
@@ -353,10 +385,17 @@ def main():
                         all_pos_points.append(point)
                     else:
                         all_neg_points.append(point)
+        
+        # 卸载VLM模型以释政GPU内存供SAM使用
+        print("[INFO] 卸载VLM模型释放内存...")
+        vlm.unload_model()
 
-        # 步骤4: 使用收集的点进行SAM分割
+        # 步骤4: 使用收集的点进行sam分割
         if all_pos_points or all_neg_points:
             print(f"步骤4: 使用 {len(all_pos_points)} 个正点和 {len(all_neg_points)} 个负点进行分割...")
+            # 清理GPU缓存以释放内存
+            import torch
+            torch.cuda.empty_cache()
             current_mask = refine_mask_with_points(predictor, image, roi_box,
                                                  all_pos_points, all_neg_points, current_mask)
             save_image(os.path.join(output_dir, f'step4_round{round_idx + 1}_refined_mask.png'), current_mask)
@@ -372,7 +411,7 @@ def main():
     final_vis[current_mask > 0] = final_vis[current_mask > 0] * 0.6 + np.array([0, 255, 0]) * 0.4
     save_image(os.path.join(output_dir, 'final_visualization.png'), final_vis)
 
-    print(f"\n=== 重构完成! ===")
+    print("\n=== 重构完成! ===")
     print(f"最终掩码像素数: {np.sum(current_mask > 0)}")
     print(f"输出目录: {output_dir}")
 
