@@ -1,3 +1,24 @@
+"""
+【SAM后端适配器模块】
+作用：提供统一的SAM模型接口，屏蔽不同SAM实现的差异
+核心功能：
+  - SegmentAnythingAdapter: 封装Meta SAM预测器，统一坐标变换和掩码选择
+  - build_sam_backend: 动态加载SAM模型权重，支持多种模型规格
+  - 设备自动选择：CUDA/CPU自动适配
+  - 掩码标准化：统一输出0/255格式的uint8掩码
+
+与系统其他模块关系：
+  - 被sam_refine.py调用作为SAM预测器
+  - 提供标准化的predict接口，接收点坐标和标签
+  - 处理坐标变换和掩码选择逻辑
+
+技术特点：
+  - 适配器模式：隐藏底层SAM实现细节
+  - 自动坐标变换：将图像坐标映射到SAM输入空间
+  - 鲁棒的异常处理：缺失依赖时的友好错误提示
+  - 支持多模型规格：vit_h/vit_l/vit_b
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

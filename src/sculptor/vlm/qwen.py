@@ -1,3 +1,24 @@
+"""
+【Qwen2.5-VL模型集成模块】
+作用：集成Qwen2.5-VL-7B-Instruct视觉语言模型，实现图像分析和点评估
+核心功能：
+  - 双模式支持：本地推理（AWQ量化）和HTTP服务器模式
+  - 图像编码：将numpy数组转换为PNG格式进行传输
+  - 提示工程：构建PEval（整体评估）和PGen（点生成）的提示词
+  - 结果解析：将VLM输出解析为结构化JSON数据
+
+与上下游模块关系：
+  - 接收patches.py提取的图像块
+  - 输出结构化分析结果给select_points.py
+  - 通过base.py定义的VLMBase接口实现标准化调用
+
+技术特点：
+  - 零依赖启动：默认返回空JSON，避免网络调用
+  - 本地推理支持：完整的Qwen2.5-VL-AWQ加载和推理流程
+  - 错误恢复：模型加载失败时优雅降级
+  - 标准化接口：统一的peval/pgen方法签名
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional

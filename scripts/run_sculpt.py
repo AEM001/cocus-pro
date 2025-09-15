@@ -1,3 +1,32 @@
+"""
+【VLM雕刻主运行脚本】
+作用：提供完整的VLM驱动雕刻流程的命令行接口，支持多轮迭代优化
+核心功能：
+  - 端到端流程：从初始掩码到最终精细掩码的完整pipeline
+  - 多轮迭代：支持1-N轮雕刻，每轮包含候选采样→VLM分析→点选择→SAM精炼
+  - 模型选择：支持mock/qwen两种VLM模式，本地/服务器两种运行方式
+  - 可视化输出：每轮生成中间结果便于调试和分析
+
+与系统模块关系：
+  - 集成sculptor所有子模块：candidates, patches, vlm, select_points, sam_refine, utils
+  - 作为系统的入口点，协调各模块协同工作
+  - 提供CLI参数解析和配置管理
+
+使用流程：
+  1. 加载图像和初始掩码
+  2. 设置ROI区域（自动/手动）
+  3. 选择VLM模型（mock/qwen）
+  4. 配置SAM后端（可选）
+  5. 运行多轮雕刻
+  6. 输出最终结果和中间可视化
+
+输出结构：
+  - outputs/sculpt/[图像名]/
+    - roundX_*.png/json: 每轮中间结果
+    - final_mask.png: 最终精细掩码
+    - meta.json: 运行元数据
+"""
+
 # 运行1-N轮雕刻的CLI（Peval + Pgen → P⁺/P⁻ → SAM精化）。
 from __future__ import annotations
 

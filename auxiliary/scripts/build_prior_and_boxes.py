@@ -1,3 +1,32 @@
+"""
+【LLM输出到SAM输入转换器】
+作用：将LLM生成的行/列ID转换为SAM可用的初始掩码和边界框
+核心功能：
+  - 行/列ID解析：从LLM输出JSON中提取行列标识符
+  - 掩码生成：基于行列ID的交集生成初始二值掩码
+  - 边界框计算：从掩码计算最小外接矩形作为SAM输入
+  - 数据验证：处理越界ID、空结果等异常情况
+
+与上下游模块关系：
+  - 接收LLM输出：从llm_out/{name}_output.json读取行列ID
+  - 接收网格元数据：从out/{name}/{name}_meta.json读取行列边界
+  - 输出SAM输入：生成box_out/{name}/目录下的prior_mask.png和sam_boxes.json
+  - 供run_sculpt_simple.py和run_sculpt.py作为输入
+
+技术特点：
+  - 智能方向检测：自动识别行列ID是否被LLM交换
+  - 容错处理：越界ID自动裁剪，空结果优雅处理
+  - 标准化输出：统一目录结构和文件命名规范
+  - 扩展支持：支持多种ID字段名格式兼容
+
+工作流程：
+  1. 加载LLM输出和网格元数据
+  2. 解析并验证行列ID
+  3. 生成初始掩码（行列交集并集）
+  4. 计算边界框并可选扩展
+  5. 输出标准化SAM输入文件
+"""
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
