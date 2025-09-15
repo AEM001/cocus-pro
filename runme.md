@@ -1,94 +1,92 @@
-# runme.md
+# SAM优先VLM雕刻工作流中文使用指南
 
-This document summarizes how to run the SAM-first VLM sculpting workflow and all configurable parameters.
+## 快速开始
 
-Quick start
-
-- Activate environment and set tokenizer behavior
+- 激活环境并设置分词器行为
 
 ```bash
 conda activate camo-vlm
 export TOKENIZERS_PARALLELISM=false
 ```
 
-- Run with local Qwen2.5-VL-AWQ and auto-SAM
+- 使用本地Qwen2.5-VL-AWQ和自动SAM运行
 
 ```bash
-python scripts/run_sculpt_simple.py <name> [--rounds N]
+python scripts/run_sculpt_simple.py <名称> [--轮数 N]
 ```
 
-Examples
+## 使用示例
 
 ```bash
-# Using Qwen (default), auto-detect SAM checkpoint under models/
+# 使用Qwen（默认），自动检测models/下的SAM检查点
 python scripts/run_sculpt_simple.py f --rounds 2
 
-# Using Mock VLM (no GPU needed)
+# 使用Mock VLM（无需GPU）
 python scripts/run_sculpt_simple.py f --rounds 2 --model mock
 
-# Explicitly specify SAM checkpoint and device
+# 显式指定SAM检查点和设备
 python scripts/run_sculpt_simple.py f \
   --sam_checkpoint models/sam_vit_h_4b8939.pth \
   --sam_type vit_h \
   --sam_device cuda \
   --rounds 2
 
-# Use a custom Qwen model directory
+# 使用自定义Qwen模型目录
 python scripts/run_sculpt_simple.py f --model qwen --model_dir models/Qwen2.5-VL-7B-Instruct-AWQ
 ```
 
-Standard data layout
+## 标准数据布局
 
-- Input image: auxiliary/images/{name}.png
-- ROI + prior: auxiliary/box_out/{name}/{name}_sam_boxes.json and {name}_prior_mask.png
-- Instance spec: auxiliary/llm_out/{name}_output.json (field: instance)
-- Outputs: outputs/sculpt/{name}/
+- 输入图像：`auxiliary/images/{名称}.png`
+- ROI + 先验：`auxiliary/box_out/{名称}/{名称}_sam_boxes.json` 和 `{名称}_prior_mask.png`
+- 实例说明：`auxiliary/llm_out/{名称}_output.json`（字段：instance）
+- 输出：`outputs/sculpt/{名称}/`
 
-What the script does
+## 脚本执行流程
 
-1) Loads the image, ROI, prior mask, and instance (auto)
-2) Generates an initial SAM mask from the ROI box (strictly clipped to ROI)
-3) Performs N rounds of VLM-driven sculpting
-4) Saves per-round points, peval JSON, scores JSON, masks, and final outputs
+1) 自动加载图像、ROI、先验掩码和实例
+2) 从ROI框生成初始SAM掩码（严格裁剪到ROI内）
+3) 执行N轮VLM驱动雕刻
+4) 保存每轮控制点、peval JSON、分数JSON、掩码和最终输出
 
-All configurable parameters
+## 所有可配置参数
 
-scripts/run_sculpt_simple.py
+### scripts/run_sculpt_simple.py
 
-- name (positional)
-  - Target sample name, matching files under auxiliary/.
+- **name**（位置参数）
+  - 目标样本名称，匹配auxiliary/下的文件
 
-- --rounds int (default: 2)
-  - Number of sculpting rounds.
+- **--rounds int**（默认：2）
+  - 雕刻轮数
 
-- --model [mock|qwen] (default: qwen)
-  - Choose the VLM backend.
+- **--model [mock|qwen]**（默认：qwen）
+  - 选择VLM后端
 
-- --model_dir str (default: models/Qwen2.5-VL-7B-Instruct-AWQ)
-  - Path to the local Qwen2.5-VL model directory.
+- **--model_dir str**（默认：models/Qwen2.5-VL-7B-Instruct-AWQ）
+  - 本地Qwen2.5-VL模型目录路径
 
-- --sam_checkpoint str (optional)
-  - Path to SAM checkpoint (.pth). If omitted, the script auto-scans under models/ for a checkpoint named like sam_*vit_[hlb]*.pth
+- **--sam_checkpoint str**（可选）
+  - SAM检查点路径(.pth)。如省略，脚本自动扫描models/下类似sam_*vit_[hlb]*.pth的检查点
 
-- --sam_type [vit_h|vit_l|vit_b] (default: vit_h)
-  - SAM model type matching the checkpoint.
+- **--sam_type [vit_h|vit_l|vit_b]**（默认：vit_h）
+  - 与检查点匹配的SAM模型类型
 
-- --sam_device [cuda|cpu] (optional)
-  - Device for SAM. If omitted, inferred by torch.
+- **--sam_device [cuda|cpu]**（可选）
+  - SAM设备。如省略，由torch推断
 
-- --K_pos int (default: 6)
-  - Number of positive points per round.
+- **--K_pos int**（默认：6）
+  - 每轮正样本点数
 
-- --K_neg int (default: 6)
-  - Number of negative points per round.
+- **--K_neg int**（默认：6）
+  - 每轮负样本点数
 
-Environment variables
+## 环境变量
 
-- TOKENIZERS_PARALLELISM=false
-  - Prevents tokenizers from spawning parallel workers which can cause warnings.
+- **TOKENIZERS_PARALLELISM=false**
+  - 防止分词器生成并行工作进程导致警告
 
-Notes
+## 注意事项
 
-- SAM initial mask is strictly clipped to the ROI box to ensure initialization is contained.
-- Candidate sampling prioritizes boundary points with density adapted to boundary length.
-- Patch scales are small and based on target size (mask bbox) with slight context to capture both sides of the boundary.
+- SAM初始掩码严格裁剪到ROI框内，确保初始化包含在内
+- 候选采样优先边界点，密度根据边界长度自适应
+- Patch尺度较小且基于目标尺寸（掩码bbox），带轻微上下文以捕获边界两侧

@@ -395,7 +395,7 @@ def main():
             I,
             pts,
             B,
-            scales=[0.05, 0.08, 0.12],  # smaller scales for boundary detail
+            scales=[0.05, 0.15, 0.25],  # smaller scales for boundary detail
             aug_light=True,
             mask=current_mask,
             context=1.15,  # include slight context to cover both sides of boundary

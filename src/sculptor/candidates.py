@@ -159,7 +159,7 @@ def _sample_outside(mask: np.ndarray, B: ROIBox, num: int) -> List[Tuple[float, 
         cv2 = None
     if cv2 is not None:
         ker = np.ones((3, 3), np.uint8)
-        dil = cv2.dilate(m, ker, iterations=2)
+        dil = cv2.dilate(m, ker, iterations=4)
         outer = (dil > 0) & (m == 0)
     else:
         outer = (np.pad(m, 1, mode="edge")[1:-1, 1:-1] > 0) & (m == 0)
@@ -187,13 +187,13 @@ def sample_candidates(mask: np.ndarray, B: ROIBox, max_total: int = 30, nms_r_ra
     Bc = B.clip_to(W, H)
     Mb = _mask_bbox(mask)
     # Estimate boundary length by band pixel count (k=1)
-    band = _compute_band(mask, Bc, k=1)
+    band = _compute_band(mask, Bc, k=3)
     boundary_len = int((band > 0).sum())
     # Adaptive total based on boundary length
-    target_total = int(max(12, min(max_total, boundary_len / 40.0)))
+    target_total = int(max(20, min(max_total, boundary_len / 20.0)))
     # Quotas: band 70%, inside 15%, outside 15%
-    band_q = max(4, int(round(target_total * 0.7)))
-    inside_q = max(1, int(round(target_total * 0.15)))
+    band_q = max(4, int(round(target_total * 0.65)))
+    inside_q = max(1, int(round(target_total * 0.10)))
     outside_q = max(1, target_total - band_q - inside_q)
 
     inside_pts = _sample_inside(mask, Mb, num=inside_q)
