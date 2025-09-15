@@ -46,34 +46,42 @@ class SegmentAnythingAdapter:
             self.predictor.set_image(image_rgb)
             self._last_image_shape = (H, W)
 
-    def predict(self, image_rgb: np.ndarray, points: np.ndarray, labels: np.ndarray, box_xyxy: Tuple[float, float, float, float]) -> np.ndarray:
+    def predict(self, image_rgb: np.ndarray, points: np.ndarray, labels: np.ndarray, box_xyxy: Tuple[float, float, float, float], prev_mask: Optional[np.ndarray] = None) -> np.ndarray:
         self._ensure_image(image_rgb)
-        # Transform coordinates to SAM's input space
+        # IMPORTANT: Do NOT pre-transform coordinates here. SamPredictor.predict will handle
+        # coordinate transforms internally for numpy API in most versions. Pre-transforming
+        # would cause a double transform and severe misalignment.
         pt_coords = points.astype(np.float32)
         if pt_coords.ndim == 1:
             pt_coords = pt_coords[None, :]
-        pt_coords = self.predictor.transform.apply_coords(pt_coords, image_rgb.shape[:2])
-        box = np.array([box_xyxy], dtype=np.float32)
-        if hasattr(self.predictor.transform, "apply_boxes"):
-            box_t = self.predictor.transform.apply_boxes(box, image_rgb.shape[:2])[0]
-        else:
-            # Some versions may not expose apply_boxes; pass raw and rely on predictor
-            box_t = box[0]
+        box_vec = np.array(box_xyxy, dtype=np.float32)
 
         masks, scores, logits = self.predictor.predict(
             point_coords=pt_coords if len(pt_coords) > 0 else None,
             point_labels=labels.astype(np.int32) if len(labels) > 0 else None,
-            box=box_t,
+            box=box_vec,
             multimask_output=True,
-            return_logits=False,
         )
-        # Select best by highest score
-        if isinstance(scores, np.ndarray) and scores.size > 0:
-            k = int(np.argmax(scores))
-            m = masks[k]
-        else:
-            # Fallback to first
-            m = masks[0]
+        # Choose best proposal
+        sel = 0
+        if prev_mask is not None and isinstance(masks, np.ndarray) and masks.ndim == 3 and masks.shape[1:] == prev_mask.shape[:2]:
+            # Compute IoU within the ROI box to prefer masks that align with previous/prior mask
+            H, W = prev_mask.shape[:2]
+            x0, y0, x1, y1 = int(max(0, min(W - 1, box_xyxy[0]))), int(max(0, min(H - 1, box_xyxy[1]))), int(max(0, min(W, box_xyxy[2]))), int(max(0, min(H, box_xyxy[3])))
+            x1 = max(x1, x0 + 1); y1 = max(y1, y0 + 1)
+            pm = (prev_mask[y0:y1, x0:x1] > 0).astype(np.uint8)
+            best_iou = -1.0
+            for i in range(masks.shape[0]):
+                mi = (masks[i, y0:y1, x0:x1] > 0).astype(np.uint8)
+                inter = int((pm & mi).sum())
+                union = int((pm | mi).sum()) or 1
+                iou = inter / union
+                if iou > best_iou:
+                    best_iou = iou
+                    sel = i
+        elif isinstance(scores, np.ndarray) and scores.size > 0:
+            sel = int(np.argmax(scores))
+        m = masks[sel]
         return (m.astype(np.uint8) > 0).astype(np.uint8) * 255
 
 

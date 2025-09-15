@@ -63,13 +63,45 @@ def select_points(
     candidates: List[Candidate], scores: Dict[int, float], B: ROIBox, K_pos: int = 6, K_neg: int = 6
 ) -> Tuple[np.ndarray, np.ndarray, List[Candidate], List[Candidate]]:
     tau_pos, tau_neg = estimate_neg_thresholds(candidates, scores, B)
-    pos_pool = [c for c in candidates if scores.get(c.idx, 0.0) >= tau_pos]
-    neg_pool = [c for c in candidates if scores.get(c.idx, 0.0) <= tau_neg]
 
-    # Selection based on thresholds
+    # Prefer positives from inside/band and negatives from outside/band
+    pos_pool = [c for c in candidates if scores.get(c.idx, 0.0) >= tau_pos and c.kind in ("inside", "band")]
+    neg_pool = [c for c in candidates if scores.get(c.idx, 0.0) <= tau_neg and c.kind in ("outside", "band")]
+
+    # Primary selection with spatial NMS
     pos = spatial_nms_sorted(pos_pool, scores, B, topk=K_pos) if pos_pool else []
     inv_pool = {i: 1.0 - float(scores.get(i, 0.0)) for i in [c.idx for c in neg_pool]}
     neg = spatial_nms_sorted(neg_pool, inv_pool, B, topk=K_neg) if neg_pool else []
+
+    # Fallback to ensure minimum positives: take top scoring inside/band if thresholds too strict
+    if len(pos) < K_pos:
+        ib_pool = [c for c in candidates if c.kind in ("inside", "band")]
+        ib_sorted = sorted(ib_pool, key=lambda c: scores.get(c.idx, 0.0), reverse=True)
+        # Merge, keep unique by idx
+        exist = {c.idx for c in pos}
+        for c in ib_sorted:
+            if len(pos) >= K_pos:
+                break
+            if c.idx not in exist:
+                pos.append(c)
+                exist.add(c.idx)
+        # Re-apply NMS and topK just in case
+        pos = spatial_nms_sorted(pos, scores, B, topk=K_pos)
+
+    # Fallback for negatives: prefer outside low scorers
+    if len(neg) < K_neg:
+        out_pool = [c for c in candidates if c.kind == "outside"]
+        out_sorted = sorted(out_pool, key=lambda c: scores.get(c.idx, 0.0))  # ascending for negatives
+        exist = {c.idx for c in neg}
+        for c in out_sorted:
+            if len(neg) >= K_neg:
+                break
+            if c.idx not in exist:
+                neg.append(c)
+                exist.add(c.idx)
+        # Re-NMS on negative pool with inverted scores
+        inv_pool2 = {c.idx: 1.0 - float(scores.get(c.idx, 0.0)) for c in neg}
+        neg = spatial_nms_sorted(neg, inv_pool2, B, topk=K_neg)
 
     points = np.array([p.xy for p in pos + neg], dtype=np.float32)
     labels = np.array([1] * len(pos) + [0] * len(neg), dtype=np.int32)

@@ -56,7 +56,7 @@ class SamPredictorWrapper:
             return prev_mask
         xyxy = (float(box.x0), float(box.y0), float(box.x1), float(box.y1))
         try:
-            return self.backend.predict(image_rgb, points, labels, xyxy)
+            return self.backend.predict(image_rgb, points, labels, xyxy, prev_mask=prev_mask)
         except Exception:
             # Safe fallback on any runtime error
             return prev_mask
