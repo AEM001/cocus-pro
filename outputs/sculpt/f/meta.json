@@ -1,0 +1,21 @@
+{
+  "name": "f",
+  "instance": "camouflaged scorpionfish",
+  "roi": [
+    427.0,
+    320.0,
+    995.0,
+    639.0
+  ],
+  "rounds_completed": 1,
+  "history": [
+    {
+      "round": 0,
+      "num_pos": 0,
+      "num_neg": 6,
+      "early_stop": true
+    }
+  ],
+  "model": "qwen",
+  "workflow": "sam_first_sculpting"
+}

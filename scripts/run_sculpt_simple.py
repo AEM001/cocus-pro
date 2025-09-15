@@ -38,10 +38,15 @@ import os
 import sys
 from typing import Dict, List, Tuple, Optional
 
+# Reduce tokenizer fork/parallelism warnings and potential deadlocks
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 THIS_DIR = os.path.dirname(__file__)
 SRC_DIR = os.path.abspath(os.path.join(THIS_DIR, "..", "src"))
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
+
+import numpy as np
 
 from sculptor.candidates import sample_candidates
 from sculptor.patches import multi_scale_with_aug
@@ -160,49 +165,54 @@ def load_config_from_name(name: str) -> Dict:
     
     return config
 
-def generate_sam_mask_from_prior(image, roi_box, sam_wrapper, prior_mask=None):
+def generate_sam_mask_from_prior(image, roi_box, sam_wrapper, prior_mask, pre_points=None, pre_labels=None):
     """
-    Generate initial SAM mask from prior box (and optionally prior mask).
+    Generate initial SAM mask using ROI box and optional pre-SAM seed points, strictly within ROI.
     
     Args:
         image: RGB image array
-        roi_box: ROIBox object  
-        sam_wrapper: SamPredictorWrapper instance
-        prior_mask: Optional prior mask for guidance
+        roi_box: ROIBox object
+        sam_wrapper: SamPredictorWrapper instance (must have backend)
+        prior_mask: Prior mask for guidance (only used for clipping/diagnostics)
+        pre_points: Optional Nx2 float array of seed points
+        pre_labels: Optional N int array of labels (1=pos, 0=neg)
     
     Returns:
-        numpy.ndarray: Generated mask
+        numpy.ndarray: Generated mask clipped to ROI
     """
-    print("[INFO] Generating initial SAM mask from prior box...")
-    
-    if sam_wrapper.backend is None:
-        print("[WARN] No SAM backend available, using prior mask as fallback")
-        if prior_mask is not None:
-            return prior_mask
-        else:
-            # Create a simple box mask as fallback
-            import numpy as np
-            H, W = image.shape[:2]
-            mask = np.zeros((H, W), dtype=np.uint8)
-            x0, y0, x1, y1 = int(roi_box.x0), int(roi_box.y0), int(roi_box.x1), int(roi_box.y1)
-            mask[y0:y1, x0:x1] = 255
-            return mask
-    
-    # Use SAM with the ROI box to generate initial mask
-    # For now, we'll use an empty points array and let SAM work with just the box
+    print("[INFO] Generating initial SAM mask (with optional VLM seeds)...")
+
     import numpy as np
-    empty_points = np.array([[]], dtype=np.float32).reshape(0, 2)
-    empty_labels = np.array([], dtype=np.int32)
-    
+    H, W = image.shape[:2]
+    x0, y0, x1, y1 = _roi_int_bounds(roi_box, H, W)
+
+    def _clip_to_roi(mask: np.ndarray) -> np.ndarray:
+        clipped = np.zeros_like(mask, dtype=np.uint8)
+        clipped[y0:y1, x0:x1] = (mask[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
+        return clipped
+
+    # Require SAM backend to be available
+    if sam_wrapper.backend is None:
+        raise RuntimeError("SAM backend is required but not available")
+
+    # Use SAM with ROI box and optional seed points
+    if pre_points is None or len(pre_points) == 0:
+        pts = np.array([[]], dtype=np.float32).reshape(0, 2)
+        lbs = np.array([], dtype=np.int32)
+    else:
+        pts = np.asarray(pre_points, dtype=np.float32)
+        lbs = np.asarray(pre_labels, dtype=np.int32) if pre_labels is not None else np.ones((len(pts),), dtype=np.int32)
+
     initial_mask = sam_wrapper.predict(
-        image, 
-        empty_points, 
-        empty_labels, 
-        roi_box, 
-        prior_mask if prior_mask is not None else np.zeros(image.shape[:2], dtype=np.uint8)
+        image,
+        pts,
+        lbs,
+        roi_box,
+        prior_mask,
     )
-    
-    print(f"[INFO] Generated SAM mask with {(initial_mask > 0).sum()} pixels")
+
+    initial_mask = _clip_to_roi(initial_mask)
+    print(f"[INFO] Generated SAM mask (ROI-clipped) with {(initial_mask > 0).sum()} pixels")
     return initial_mask
 
 def short_key_cues(items: List[str], max_words: int = 15) -> str:
@@ -211,17 +221,80 @@ def short_key_cues(items: List[str], max_words: int = 15) -> str:
     words = text.split()
     return " ".join(words[:max_words])
 
+
+# Removed VLM-based pre-seeding due to instability and misalignment in your case.
+
+
+def prehint_points_simple(
+    I: np.ndarray,
+    B: ROIBox,
+    topk: int = 4,
+    negk: int = 2,
+):
+    """
+    Very simple, deterministic seeding:
+    - positives: ROI center and small offsets near the center
+    - negatives: ROI corners and side midpoints
+    This ignores any semantic cues or prior mask to avoid misalignment.
+    """
+    import numpy as np
+    H, W = I.shape[:2]
+    x0, y0, x1, y1 = _roi_int_bounds(B, H, W)
+    cx = 0.5 * (x0 + x1)
+    cy = 0.5 * (y0 + y1)
+    dx = 0.1 * (x1 - x0)
+    dy = 0.1 * (y1 - y0)
+
+    pos_candidates = [
+        (cx, cy),
+        (cx + dx, cy),
+        (cx - dx, cy),
+        (cx, cy + dy),
+        (cx, cy - dy),
+    ]
+    pos_pts: List[Tuple[float, float]] = []
+    for p in pos_candidates:
+        if len(pos_pts) >= max(1, topk):
+            break
+        px = float(max(0, min(W - 1, p[0])))
+        py = float(max(0, min(H - 1, p[1])))
+        pos_pts.append((px, py))
+
+    neg_candidates = [
+        (x0 + 2, y0 + 2), (x1 - 2, y0 + 2), (x0 + 2, y1 - 2), (x1 - 2, y1 - 2),
+        (cx, y0 + 2), (cx, y1 - 2), (x0 + 2, cy), (x1 - 2, cy),
+    ]
+    neg_pts: List[Tuple[float, float]] = []
+    for q in neg_candidates:
+        if len(neg_pts) >= max(0, negk):
+            break
+        qx = float(max(0, min(W - 1, q[0])))
+        qy = float(max(0, min(H - 1, q[1])))
+        neg_pts.append((qx, qy))
+
+    P = np.array(pos_pts + neg_pts, dtype=np.float32) if (pos_pts or neg_pts) else None
+    L = np.array([1] * len(pos_pts) + [0] * len(neg_pts), dtype=np.int32) if (pos_pts or neg_pts) else None
+    return P, L, pos_pts, neg_pts
+
 def main():
     parser = argparse.ArgumentParser(description="Simplified VLM-driven sculpting with SAM-first workflow")
     parser.add_argument("name", help="Name of the sample (e.g., 'dog', 'f', 'q')")
     parser.add_argument("--rounds", type=int, default=2, help="Number of sculpting rounds")
     parser.add_argument("--model", choices=["mock", "qwen"], default="qwen", help="VLM model to use")
-    parser.add_argument("--model_dir", default="models/Qwen2.5-VL-7B-Instruct-AWQ", help="Qwen model directory")
+    parser.add_argument("--model_dir", default="models/Qwen2.5-VL-3B-Instruct", help="Qwen model directory (defaults to 3B)")
     parser.add_argument("--sam_checkpoint", default=None, help="SAM checkpoint path")
     parser.add_argument("--sam_type", default="vit_h", choices=["vit_h", "vit_l", "vit_b"], help="SAM model type")
     parser.add_argument("--sam_device", default=None, help="SAM device (cuda/cpu)")
     parser.add_argument("--K_pos", type=int, default=6, help="Number of positive points per round")
     parser.add_argument("--K_neg", type=int, default=6, help="Number of negative points per round")
+    # Qwen generation control
+    parser.add_argument("--qwen_max_new_tokens", type=int, default=96, help="Max new tokens for Qwen generation (peval/pgen)")
+    # Pre-SAM hinting controls (strictly geometry-based; semantic option removed)
+    parser.add_argument("--pre_sam_topk", type=int, default=3, help="Number of positive seed points near ROI center")
+    parser.add_argument("--pre_sam_negk", type=int, default=2, help="Number of negative seed points at ROI corners/edges")
+    parser.add_argument("--pre_sam_hints", dest="pre_sam_hints", action="store_true", help="Enable seeding before initial SAM")
+    parser.add_argument("--no-pre_sam_hints", dest="pre_sam_hints", action="store_false", help="Disable seeding before initial SAM")
+    parser.set_defaults(pre_sam_hints=True)
     
     args = parser.parse_args()
     
@@ -250,24 +323,27 @@ def main():
     if args.model == "mock":
         vlm = MockVLM()
     else:
-        vlm = QwenVLM(mode="local", model_dir=config['base_dir'] + '/' + args.model_dir)
+        vlm = QwenVLM(mode="local", model_dir=config['base_dir'] + '/' + args.model_dir, gen_max_new_tokens=args.qwen_max_new_tokens)
     
-    # Initialize SAM (optional)
+    # Initialize SAM (required)
     sam_backend = None
     if args.sam_checkpoint and os.path.exists(args.sam_checkpoint):
-        try:
-            from sculptor.sam_backends import build_sam_backend
-            sam_backend = build_sam_backend(
-                checkpoint_path=args.sam_checkpoint,
-                model_type=args.sam_type,
-                device=args.sam_device,
-            )
-            print(f"[INFO] Loaded SAM backend: {args.sam_checkpoint}")
-        except Exception as e:
-            print(f"[WARN] SAM backend not available: {e}")
+        from sculptor.sam_backends import build_sam_backend
+        sam_backend = build_sam_backend(
+            checkpoint_path=args.sam_checkpoint,
+            model_type=args.sam_type,
+            device=args.sam_device,
+        )
+        print(f"[INFO] Loaded SAM backend: {args.sam_checkpoint}")
     else:
         # Try auto-discovery under models/
         sam_backend = _auto_build_sam_backend(config['base_dir'], args.sam_device)
+    
+    if sam_backend is None:
+        print("[ERROR] SAM backend is required but not available")
+        print("Please ensure a SAM checkpoint is available or specify --sam_checkpoint")
+        return 1
+    
     sam = SamPredictorWrapper(backend=sam_backend)
     
     # Create output directory
@@ -277,8 +353,28 @@ def main():
     print(f"[INFO] Instance: '{config['instance']}'")
     print(f"[INFO] Rounds: {args.rounds}")
     
-    # Step 1: Generate initial SAM mask from prior
-    current_mask = generate_sam_mask_from_prior(I, B, sam, prior_mask)
+# Optional: Pre-SAM VLM seeding to guide initial segmentation
+    P0 = None
+    L0 = None
+    if args.pre_sam_hints:
+        print("[INFO] Running pre-SAM geometry seeding (ROI center + corner negatives)...")
+        P0, L0, pos_seeds, neg_seeds = prehint_points_simple(
+            I,
+            B,
+            topk=args.pre_sam_topk,
+            negk=args.pre_sam_negk,
+        )
+        # Visualize seeds
+        if P0 is not None and len(P0) > 0:
+            colors = [(0, 255, 0) if l == 1 else (255, 0, 0) for l in L0]
+            vis_seeds = draw_points(I, [(float(x), float(y)) for x, y in P0], colors, r=4)
+            save_image(os.path.join(config['output_dir'], "pre_sam_hints.png"), vis_seeds)
+            print(f"[INFO] Pre-SAM seeds: {len(pos_seeds)} pos, {len(neg_seeds)} neg")
+        else:
+            print("[INFO] No reliable pre-SAM seeds found; proceeding with box-only")
+
+    # Step 1: Generate initial SAM mask from prior (+ optional seeds)
+    current_mask = generate_sam_mask_from_prior(I, B, sam, prior_mask, pre_points=P0, pre_labels=L0)
     
     # Save initial SAM mask
     save_image(os.path.join(config['output_dir'], "sam_initial_mask.png"), 
@@ -294,8 +390,16 @@ def main():
         pts = [c.xy for c in cand]
         print(f"[INFO] Sampled {len(cand)} candidate points")
         
-        # B) Extract multi-scale patches
-        patches = multi_scale_with_aug(I, pts, B, scales=[0.08, 0.12, 0.18], aug_light=True)
+        # B) Extract multi-scale patches (target-size & boundary-sensitive small scales)
+        patches = multi_scale_with_aug(
+            I,
+            pts,
+            B,
+            scales=[0.05, 0.08, 0.12],  # smaller scales for boundary detail
+            aug_light=True,
+            mask=current_mask,
+            context=1.15,  # include slight context to cover both sides of boundary
+        )
         print(f"[INFO] Extracted patches for {len(patches)} candidates")
         
         # C1) Peval - semantic evaluation of current mask (ROI-only overlay)

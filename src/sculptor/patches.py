@@ -65,19 +65,38 @@ def _augment_light(patch: np.ndarray) -> List[np.ndarray]:
     return ps[:3]  # keep light set
 
 
-def multi_scale_patches(I: np.ndarray, pts: Sequence[Tuple[float, float]], B: ROIBox, scales: Sequence[float]) -> Dict[int, List[np.ndarray]]:
+def _mask_bbox(mask: np.ndarray | None, B: ROIBox) -> ROIBox:
+    if mask is None:
+        return B
+    ys, xs = np.where(mask > 0)
+    if xs.size == 0 or ys.size == 0:
+        return B
+    x0, x1 = float(xs.min()), float(xs.max() + 1)
+    y0, y1 = float(ys.min()), float(ys.max() + 1)
+    return ROIBox(x0, y0, x1, y1)
+
+
+def multi_scale_patches(
+    I: np.ndarray,
+    pts: Sequence[Tuple[float, float]],
+    B: ROIBox,
+    scales: Sequence[float],
+    mask: np.ndarray | None = None,
+    context: float = 1.15,
+) -> Dict[int, List[np.ndarray]]:
     """Extract multi-scale square patches centered at pts.
 
-    size = scale * min(wB, hB).
+    size = scale * min(w_target, h_target) * context, where target is mask bbox if provided.
     Returns dict idx -> List[patch_images].
     """
     H, W = I.shape[:2]
-    sbase = max(4, int(round(min(B.w, B.h))))
+    Tb = _mask_bbox(mask, B)
+    sbase = max(4, int(round(min(Tb.w, Tb.h))))
     out: Dict[int, List[np.ndarray]] = {}
     for i, (x, y) in enumerate(pts):
         lst: List[np.ndarray] = []
         for s in scales:
-            size = max(8, int(round(s * sbase)))
+            size = max(8, int(round(s * sbase * context)))
             if size % 2 == 0:
                 size += 1
             patch = _crop_square(I, (x, y), size)
@@ -86,8 +105,16 @@ def multi_scale_patches(I: np.ndarray, pts: Sequence[Tuple[float, float]], B: RO
     return out
 
 
-def multi_scale_with_aug(I: np.ndarray, pts: Sequence[Tuple[float, float]], B: ROIBox, scales: Sequence[float], aug_light: bool = True) -> Dict[int, List[np.ndarray]]:
-    base = multi_scale_patches(I, pts, B, scales)
+def multi_scale_with_aug(
+    I: np.ndarray,
+    pts: Sequence[Tuple[float, float]],
+    B: ROIBox,
+    scales: Sequence[float],
+    aug_light: bool = True,
+    mask: np.ndarray | None = None,
+    context: float = 1.15,
+) -> Dict[int, List[np.ndarray]]:
+    base = multi_scale_patches(I, pts, B, scales, mask=mask, context=context)
     if not aug_light:
         return base
     out: Dict[int, List[np.ndarray]] = {}

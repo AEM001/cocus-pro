@@ -1,16 +1,4 @@
 """
-Sculptor: VLM-driven point sculpting around an initial mask and ROI.
-
-Modules:
-- candidates: candidate point sampling inside/band/outside ROI
-- patches: multi-scale patch extraction and light augmentations
-- vlm: model-agnostic interface + Qwen2.5-VL stub and prompts
-- select_points: selection with thresholds + spatial NMS
-- sam_refine: SAM predictor hook and early-stop utilities
-- utils: image/mask helpers and visualizations
-"""
-
-"""
 【Sculptor模块总览】
 作用：VLM引导的迭代式掩码精细化雕刻系统
 核心功能：通过视觉语言模型(VLM)分析图像块，指导SAM模型进行精确的掩码边界雕刻

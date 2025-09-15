@@ -65,9 +65,12 @@ def select_points(
     tau_pos, tau_neg = estimate_neg_thresholds(candidates, scores, B)
     pos_pool = [c for c in candidates if scores.get(c.idx, 0.0) >= tau_pos]
     neg_pool = [c for c in candidates if scores.get(c.idx, 0.0) <= tau_neg]
-    pos = spatial_nms_sorted(pos_pool, scores, B, topk=K_pos)
-    inv = {i: 1.0 - float(scores.get(i, 0.0)) for i in [c.idx for c in neg_pool]}
-    neg = spatial_nms_sorted(neg_pool, inv, B, topk=K_neg)
+
+    # Selection based on thresholds
+    pos = spatial_nms_sorted(pos_pool, scores, B, topk=K_pos) if pos_pool else []
+    inv_pool = {i: 1.0 - float(scores.get(i, 0.0)) for i in [c.idx for c in neg_pool]}
+    neg = spatial_nms_sorted(neg_pool, inv_pool, B, topk=K_neg) if neg_pool else []
+
     points = np.array([p.xy for p in pos + neg], dtype=np.float32)
     labels = np.array([1] * len(pos) + [0] * len(neg), dtype=np.int32)
     return points, labels, pos, neg

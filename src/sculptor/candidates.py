@@ -18,7 +18,7 @@
   - 考虑纹理丰富度选择有区分性的外部点
 """
 
-# 内部/边界/外部候选采样，带空间NMS
+# 内部/边界/外部候选采样，带空间NMS（边界优先策略）
 from __future__ import annotations
 
 from typing import List, Sequence, Tuple
@@ -27,6 +27,16 @@ import numpy as np
 
 from .types import Candidate, ROIBox
 from .utils import nms_points, uniform_grid_in_box
+
+
+def _mask_bbox(mask: np.ndarray) -> ROIBox:
+    ys, xs = np.where(mask > 0)
+    if xs.size == 0 or ys.size == 0:
+        H, W = mask.shape[:2]
+        return ROIBox(0, 0, float(W), float(H))
+    x0, x1 = float(xs.min()), float(xs.max() + 1)
+    y0, y1 = float(ys.min()), float(ys.max() + 1)
+    return ROIBox(x0, y0, x1, y1)
 
 
 def _distance_transform(mask: np.ndarray) -> np.ndarray:
@@ -68,20 +78,21 @@ def _distance_transform(mask: np.ndarray) -> np.ndarray:
 
 
 def _sample_inside(mask: np.ndarray, B: ROIBox, num: int) -> List[Tuple[float, float]]:
+    # Prefer interior peaks but only a few points
     dt = _distance_transform(mask)
     H, W = mask.shape[:2]
-    # sample grid, sort by dt
-    step = max(2, int(round(min(B.w, B.h) / 20)))
-    xs = np.arange(int(B.x0), int(B.x1), step)
-    ys = np.arange(int(B.y0), int(B.y1), step)
     pts = []
     vals = []
     m = mask > 0
-    for y in ys:
-        for x in xs:
-            if 0 <= x < W and 0 <= y < H and m[int(y), int(x)]:
-                pts.append((float(x), float(y)))
-                vals.append(float(dt[int(y), int(x)]))
+    ys, xs = np.where(m)
+    if ys.size == 0:
+        return []
+    # Subsample pixels uniformly then take top by dt
+    step = max(1, int(round(max(1.0, min(B.w, B.h) / 50))))
+    for y in ys[::step]:
+        for x in xs[::step]:
+            pts.append((float(x), float(y)))
+            vals.append(float(dt[int(y), int(x)]))
     if not pts:
         return []
     order = np.argsort(-np.array(vals))
@@ -89,84 +100,116 @@ def _sample_inside(mask: np.ndarray, B: ROIBox, num: int) -> List[Tuple[float, f
     return sel
 
 
-def _sample_band(mask: np.ndarray, B: ROIBox, k: int, num: int) -> List[Tuple[float, float]]:
+def _compute_band(mask: np.ndarray, B: ROIBox, k: int) -> np.ndarray:
     try:
         import cv2
     except Exception:
         cv2 = None
     m = (mask > 0).astype(np.uint8)
     if cv2 is not None:
-        ksize = max(1, int(round(0.01 * B.diag)))
+        ksize = max(1, int(round(0.01 * max(1.0, min(B.w, B.h)))))
         ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * ksize + 1, 2 * ksize + 1))
         dil = cv2.dilate(m, ker, iterations=k)
         ero = cv2.erode(m, ker, iterations=k)
         band = ((dil > 0) & (ero == 0)).astype(np.uint8)
     else:
         from scipy.ndimage import binary_dilation, binary_erosion  # type: ignore
-
         band = (binary_dilation(m, iterations=k) & (~binary_erosion(m, iterations=k))).astype(np.uint8)
-    # uniform in band with stride
-    step = max(2, int(round(min(B.w, B.h) / 30)))
-    pts = uniform_grid_in_box(B.x0, B.y0, B.x1, B.y1, step)
-    pts = [(x, y) for (x, y) in pts if band[int(round(y)), int(round(x))] > 0]
-    if len(pts) <= num:
-        return pts
-    idx = np.linspace(0, len(pts) - 1, num=num, dtype=int)
-    return [pts[i] for i in idx]
+    return band
+
+
+def _sample_band(mask: np.ndarray, B: ROIBox, k: int, num: int) -> List[Tuple[float, float]]:
+    """Sample along boundary band using contour points if available."""
+    try:
+        import cv2
+    except Exception:
+        cv2 = None
+    band = _compute_band(mask, B, k)
+    pts: List[Tuple[float, float]] = []
+    if cv2 is not None:
+        contours, _ = cv2.findContours(band.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        all_pts: List[Tuple[float, float]] = []
+        for cnt in contours:
+            for p in cnt:
+                x, y = float(p[0][0]), float(p[0][1])
+                all_pts.append((x, y))
+        if len(all_pts) <= num:
+            pts = all_pts
+        else:
+            idx = np.linspace(0, len(all_pts) - 1, num=num, dtype=int)
+            pts = [all_pts[i] for i in idx]
+    else:
+        # Fallback: uniform grid restricted to band region
+        step = max(2, int(round(min(B.w, B.h) / 40)))
+        grid = uniform_grid_in_box(B.x0, B.y0, B.x1, B.y1, step)
+        pts = [(x, y) for (x, y) in grid if band[int(round(y)), int(round(x))] > 0]
+        if len(pts) > num:
+            idx = np.linspace(0, len(pts) - 1, num=num, dtype=int)
+            pts = [pts[i] for i in idx]
+    return pts
 
 
 def _sample_outside(mask: np.ndarray, B: ROIBox, num: int) -> List[Tuple[float, float]]:
     H, W = mask.shape[:2]
-    step = max(2, int(round(min(B.w, B.h) / 20)))
-    xs = np.arange(int(B.x0), int(B.x1), step)
-    ys = np.arange(int(B.y0), int(B.y1), step)
-    pts = []
-    vals = []
-    m = mask > 0
-    # local variance heuristic to pick textured background
-    win = max(3, int(round(0.01 * B.diag)) | 1)  # odd
-    pad = win // 2
-    padded = np.pad(m.astype(np.float32), pad, mode="edge")
-    for y in ys:
-        for x in xs:
-            if 0 <= x < W and 0 <= y < H and not m[int(y), int(x)]:
-                y0 = int(y) + pad
-                x0 = int(x) + pad
-                patch = padded[y0 - pad : y0 + pad + 1, x0 - pad : x0 + pad + 1]
-                var = float(patch.var())
-                pts.append((float(x), float(y)))
-                vals.append(var)
-    if not pts:
+    m = (mask > 0).astype(np.uint8)
+    # Use a thin outer ring as candidate region
+    try:
+        import cv2
+    except Exception:
+        cv2 = None
+    if cv2 is not None:
+        ker = np.ones((3, 3), np.uint8)
+        dil = cv2.dilate(m, ker, iterations=2)
+        outer = (dil > 0) & (m == 0)
+    else:
+        outer = (np.pad(m, 1, mode="edge")[1:-1, 1:-1] > 0) & (m == 0)
+    ys, xs = np.where(outer)
+    if xs.size == 0:
         return []
-    order = np.argsort(-np.array(vals))
-    sel = [pts[int(i)] for i in order[:num]]
-    return sel
+    step = max(1, int(round(max(1.0, min(B.w, B.h)) / 60)))
+    coords = list(zip(xs.tolist()[::step], ys.tolist()[::step]))
+    coords = [(float(x), float(y)) for (x, y) in coords]
+    if len(coords) > num:
+        idx = np.linspace(0, len(coords) - 1, num=num, dtype=int)
+        coords = [coords[i] for i in idx]
+    return coords
 
 
 def sample_candidates(mask: np.ndarray, B: ROIBox, max_total: int = 30, nms_r_ratio: float = 0.06) -> List[Candidate]:
-    """Sample candidate points from inside/band/outside of the current mask within ROI.
+    """Boundary-focused candidate sampling.
 
-    Returns a list of Candidate with absolute coordinates.
+    Strategy:
+      - Majority from boundary band (adaptive by boundary length)
+      - Few inside/outside for validation
+      - NMS radius scales with target bbox, not ROI
     """
     H, W = mask.shape[:2]
     Bc = B.clip_to(W, H)
-    # initial quotas (will be trimmed by NMS)
-    quota = max_total // 3
-    inside_pts = _sample_inside(mask, Bc, num=quota)
-    band_pts = _sample_band(mask, Bc, k=3, num=quota)
-    outside_pts = _sample_outside(mask, Bc, num=max_total - 2 * quota)
+    Mb = _mask_bbox(mask)
+    # Estimate boundary length by band pixel count (k=1)
+    band = _compute_band(mask, Bc, k=1)
+    boundary_len = int((band > 0).sum())
+    # Adaptive total based on boundary length
+    target_total = int(max(12, min(max_total, boundary_len / 40.0)))
+    # Quotas: band 70%, inside 15%, outside 15%
+    band_q = max(4, int(round(target_total * 0.7)))
+    inside_q = max(1, int(round(target_total * 0.15)))
+    outside_q = max(1, target_total - band_q - inside_q)
+
+    inside_pts = _sample_inside(mask, Mb, num=inside_q)
+    band_pts = _sample_band(mask, Mb, k=2, num=band_q)
+    outside_pts = _sample_outside(mask, Mb, num=outside_q)
 
     pts = inside_pts + band_pts + outside_pts
     kinds = (["inside"] * len(inside_pts)) + (["band"] * len(band_pts)) + (["outside"] * len(outside_pts))
-    # rudimentary pre-scores to bias NMS ordering: inside high, band mid, outside low
-    kind_score = {"inside": 1.0, "band": 0.6, "outside": 0.4}
+    # bias NMS ordering: band highest, inside mid, outside low (we want boundary first)
+    kind_score = {"band": 1.0, "inside": 0.7, "outside": 0.4}
     scores = [kind_score[k] for k in kinds]
-    r = nms_r_ratio * Bc.diag
+    # NMS radius based on mask bbox (target size)
+    r = nms_r_ratio * Mb.diag
     keep = nms_points(pts, scores, r)
     kept = [Candidate(xy=pts[i], idx=i, kind=kinds[i], score=scores[i]) for i in keep]
-    # trim to max_total
     kept = kept[:max_total]
-    # reindex idx to 0..N-1 for downstream dicts
     for j, c in enumerate(kept):
         c.idx = j
     return kept

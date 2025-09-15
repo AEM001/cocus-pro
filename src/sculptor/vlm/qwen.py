@@ -44,22 +44,24 @@ def _to_png_bytes(img_rgb: np.ndarray) -> bytes:
 
 class QwenVLM(VLMBase):
     """
-    Qwen2.5-VL-7B-Instruct integration scaffold.
+    Qwen2.5-VL integration scaffold (supports 3B/7B checkpoints).
 
     Modes:
     - server: POST to a local HTTP endpoint you host, with fields {images: [b64], system, user}
-    - local:  load a local model from `model_dir` (placeholder left for user to implement)
+    - local:  load a local model from `model_dir`.
 
     Parameters
     - mode: "server" | "local"
     - server_url: e.g., http://127.0.0.1:8000/generate  (no network calls here by default)
-    - model_dir: path to local Qwen2.5-VL-7B-Instruct weights (not loaded in this stub)
+    - model_dir: path to local Qwen2.5-VL weights (3B or 7B)
+    - gen_max_new_tokens: generation cap to reduce memory/time
     """
 
-    def __init__(self, mode: str = "server", server_url: Optional[str] = None, model_dir: Optional[str] = None):
+    def __init__(self, mode: str = "server", server_url: Optional[str] = None, model_dir: Optional[str] = None, gen_max_new_tokens: int = 96):
         self.mode = mode
         self.server_url = server_url or "http://127.0.0.1:8000/generate"
         self.model_dir = model_dir
+        self.gen_max_new_tokens = int(gen_max_new_tokens)
         self._local_model = None  # Will be set to True after successful loading
         self._model = None       # The actual model instance
         self._processor = None   # The processor instance
@@ -154,10 +156,10 @@ class QwenVLM(VLMBase):
             inputs = inputs.to(self._model.device)
             
             # Generate response
-            with torch.no_grad():
+            with torch.inference_mode():
                 generated_ids = self._model.generate(
                     **inputs,
-                    max_new_tokens=256,
+                    max_new_tokens=int(self.gen_max_new_tokens),
                     do_sample=True,
                     temperature=0.1,
                     pad_token_id=self._processor.tokenizer.eos_token_id
@@ -202,15 +204,16 @@ class QwenVLM(VLMBase):
                 trust_remote_code=True
             )
             
-            # Load model with AWQ quantization
+            # Load model (works for 3B/7B). Prefer FP16 on CUDA, CPU fallback otherwise.
+            import torch
+            dtype = torch.float16 if torch.cuda.is_available() else None
             self._model = AutoModelForVision2Seq.from_pretrained(
                 self.model_dir,
-                torch_dtype=torch.float16,
+                torch_dtype=dtype,
                 device_map="auto",
                 trust_remote_code=True,
-                # Disable flash attention for now to avoid dependency issues
-                # attn_implementation="flash_attention_2" if torch.cuda.is_available() else None
             )
+            self._model.eval()
             
             print(f"[INFO] Model loaded successfully on device: {self._model.device}")
             self._local_model = True  # Mark as successfully loaded
