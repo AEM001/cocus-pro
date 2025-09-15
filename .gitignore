@@ -1,6 +1,6 @@
 # 忽略大文件目录
 checkpoints/
-# models/
+models/
 
 # 忽略Python缓存文件
 __pycache__/

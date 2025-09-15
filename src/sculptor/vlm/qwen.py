@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional
 
 import base64
 import io
+import os
 
 import numpy as np
 
@@ -38,7 +39,9 @@ class QwenVLM(VLMBase):
         self.mode = mode
         self.server_url = server_url or "http://127.0.0.1:8000/generate"
         self.model_dir = model_dir
-        self._local_model = None  # user to implement if desired
+        self._local_model = None  # Will be set to True after successful loading
+        self._model = None       # The actual model instance
+        self._processor = None   # The processor instance
 
     # -------- public API --------
     def peval(self, image_overlay_rgb: np.ndarray, depth_vis: Optional[np.ndarray], instance: str) -> Dict[str, Any]:
@@ -85,8 +88,116 @@ class QwenVLM(VLMBase):
         return "{}"
 
     def _infer_via_local(self, images: list[np.ndarray], system: str, user: str) -> str:
-        # Placeholder for local python inference. Users can implement loading with vLLM/Transformers.
-        # You can set up your runner here using `self.model_dir`.
-        _ = (images, system, user, self.model_dir, self._local_model)
-        return "{}"
+        # Local python inference with Qwen2.5-VL-AWQ
+        if self._local_model is None:
+            self._load_local_model()
+        
+        if self._local_model is None:
+            print(f"[WARN] Model not loaded from {self.model_dir}, returning empty JSON")
+            return "{}"
+            
+        try:
+            import torch
+            # Convert numpy images to PIL Images
+            pil_images = []
+            for img in images:
+                from PIL import Image
+                pil_img = Image.fromarray(img.astype(np.uint8))
+                pil_images.append(pil_img)
+            
+            # Prepare messages in Qwen2.5-VL format
+            content = []
+            for pil_img in pil_images:
+                content.append({"type": "image", "image": pil_img})
+            content.append({"type": "text", "text": user})
+            
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content}
+            ]
+            
+            # Apply chat template
+            text = self._processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            
+            # Process inputs
+            inputs = self._processor(
+                text=[text], 
+                images=pil_images if pil_images else None, 
+                return_tensors="pt",
+                padding=True
+            )
+            
+            # Move to device
+            inputs = inputs.to(self._model.device)
+            
+            # Generate response
+            with torch.no_grad():
+                generated_ids = self._model.generate(
+                    **inputs,
+                    max_new_tokens=256,
+                    do_sample=True,
+                    temperature=0.1,
+                    pad_token_id=self._processor.tokenizer.eos_token_id
+                )
+            
+            # Decode response
+            generated_ids_trimmed = [
+                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            output_text = self._processor.batch_decode(
+                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )[0]
+            
+            return output_text.strip()
+            
+        except Exception as e:
+            print(f"[WARN] Local inference failed: {e}")
+            return "{}"
+    
+    def _load_local_model(self):
+        """Load the local Qwen2.5-VL-AWQ model"""
+        if not self.model_dir or not os.path.exists(self.model_dir):
+            print(f"[WARN] Model directory not found: {self.model_dir}")
+            return
+            
+        try:
+            from transformers import AutoModelForVision2Seq, AutoProcessor
+            from transformers import AutoConfig
+            import torch
+            
+            print(f"[INFO] Loading Qwen2.5-VL-AWQ model from {self.model_dir}")
+            
+            # Check if model files exist
+            config_path = os.path.join(self.model_dir, "config.json")
+            if not os.path.exists(config_path):
+                print(f"[WARN] config.json not found in {self.model_dir}")
+                return
+            
+            # Load processor and model
+            self._processor = AutoProcessor.from_pretrained(
+                self.model_dir,
+                trust_remote_code=True
+            )
+            
+            # Load model with AWQ quantization
+            self._model = AutoModelForVision2Seq.from_pretrained(
+                self.model_dir,
+                torch_dtype=torch.float16,
+                device_map="auto",
+                trust_remote_code=True,
+                # Disable flash attention for now to avoid dependency issues
+                # attn_implementation="flash_attention_2" if torch.cuda.is_available() else None
+            )
+            
+            print(f"[INFO] Model loaded successfully on device: {self._model.device}")
+            self._local_model = True  # Mark as successfully loaded
+            
+        except ImportError as e:
+            print(f"[WARN] Required packages not installed: {e}")
+            print("[INFO] Please ensure transformers>=4.37.0 and torch are installed")
+        except Exception as e:
+            print(f"[WARN] Failed to load model: {e}")
+            self._local_model = None
 
