@@ -1,50 +1,45 @@
-"""
-【VLM提示词工程模块】
-作用：构建视觉语言模型的提示词模板，指导VLM进行图像分析和点评估
-核心功能：
-  - build_peval_prompt: 构建整体掩码评估的提示词
-  - build_pgen_prompt: 构建单个图像块点评估的提示词
-  - 结构化输出：强制JSON格式响应
-  - 领域知识注入：包含分割任务的先验知识
-
-与系统其他模块关系：
-  - 被qwen.py和mock.py调用生成VLM输入提示
-  - 为peval/pgen接口提供标准化的提示模板
-  - 影响select_points.py接收到的VLM输出格式
-
-提示设计原则：
-  - 角色设定：专业图像分割专家
-  - 任务明确：区分整体评估vs局部点评估
-  - 输出约束：强制JSON格式确保可解析
-  - 上下文丰富：提供关键线索指导分析
-"""
-
 from __future__ import annotations
 
 from typing import Dict
 
 
-def build_peval_prompt(instance: str, word_budget: int = 40) -> Dict[str, str]:
-    system = "You are a segmentation inspector. Be concise."
+# 原有的peval和pgen提示词已删除，只保留新的anchor/quadrant提示词
+
+
+def build_anchor_prompt(instance: str) -> Dict[str, str]:
+    """Prompt to choose which labeled anchor i around the ROI needs refinement.
+
+    The input image contains the ROI rectangle with 8 labeled anchors {i}: 1..8 ordered as:
+      1=top-left corner, 2=top-mid, 3=top-right corner, 4=mid-right,
+      5=bottom-right corner, 6=bottom-mid, 7=bottom-left corner, 8=mid-left.
+    The semi-transparent current mask is overlaid in green.
+    """
+    system = "You are a segmentation inspector. Pick labeled ROI anchor indices to refine. Reply ONLY valid JSON."
     user = (
-        "You see an ROI crop, with a semi-transparent mask overlay.\n"
-        f"Target category: \"{instance}\" (single target).\n"
-        "Task: Briefly diagnose mask defects. Reply in compact JSON only:\n"
-        "{\n  \"missing_parts\": [\"...\"],\n  \"over_segments\": [\"...\"],\n  \"boundary_quality\": \"sharp|soft|fragmented\",\n  \"key_cues\": [\"shape/texture/depth cues for the true object\"]\n}\n"
-        f"Word budget: within {word_budget} words total."
+        f"We segment a single target instance: '{instance}'.\n"
+        "You see an image with an ROI rectangle and 8 labeled anchors {i}.\n"
+        "Task: choose 1-3 anchors whose vicinity most needs refinement of the current mask.\n"
+        "Reply JSON only with this schema:\n"
+        "{\n  \"anchors_to_refine\": [ { \"id\": 1-8, \"reason\": \"...\" } ]\n}"
     )
     return {"system": system, "user": user}
 
 
-def build_pgen_prompt(instance: str, key_cues: str) -> Dict[str, str]:
-    system = (
-        "You label whether a small image patch belongs to the SINGLE target category.\n"
-        "Be strict and concise. Do not reveal your reasoning."
-    )
+def build_quadrant_prompt(instance: str, anchor_id: int) -> Dict[str, str]:
+    """Prompt to choose quadrant regions and suggest pos/neg points for next SAM.
+
+    The input is a crop around anchor i containing a square divided into 4 labeled regions {j}:
+      j=1: top-left quadrant, j=2: top-right, j=3: bottom-right, j=4: bottom-left.
+    Also include previously chosen anchor id i for context.
+    """
+    system = "You are a segmentation refiner. Suggest where to add positive/negative points. Reply ONLY valid JSON."
     user = (
-        f"Target: \"{instance}\".\n"
-        f"Visual cues (may help disambiguation): \"{key_cues}\".\n"
-        "Answer JSON only:\n{\"is_target\": true|false, \"conf\": 0.00-1.00}"
+        f"Single target instance: '{instance}'.\n"
+        f"We focus on anchor i={anchor_id}. The square is split into 4 labeled regions {{j}} (1..4).\n"
+        "Mask is shown in green overlay.\n"
+        "Decide in which regions to add POSITIVE points (foreground) and NEGATIVE points (background) to improve SAM next step.\n"
+        "Keep the number of points small (<=2 per type).\n"
+        "Reply JSON only with this schema:\n"
+        "{\n  \"anchor_id\": i,\n  \"edits\": [ { \"region_id\": 1-4, \"action\": \"pos\"|\"neg\", \"why\": \"...\" } ]\n}"
     )
     return {"system": system, "user": user}
-

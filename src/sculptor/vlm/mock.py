@@ -9,26 +9,24 @@ from .base import VLMBase
 
 
 class MockVLM(VLMBase):
-    """A deterministic-ish mock VLM for development without a real model."""
+    """重构后的Mock VLM，只支持anchor/quadrant指导"""
 
     def __init__(self, seed: int = 123):
         self.rng = random.Random(seed)
 
-    def peval(self, image_overlay_rgb: np.ndarray, depth_vis: Optional[np.ndarray], instance: str) -> Dict[str, Any]:
-        _ = (image_overlay_rgb, depth_vis, instance)
-        # trivial template
-        return {
-            "missing_parts": [],
-            "over_segments": [],
-            "boundary_quality": "soft",
-            "key_cues": ["overall shape", "texture", "edges"],
-        }
+    def choose_anchors(self, image_with_anchors_rgb: np.ndarray, instance: str) -> Dict[str, Any]:
+        _ = instance
+        # 固定推荐：顶部中点(2)和右侧中点(4)
+        return {"anchors_to_refine": [
+            {"id": 2, "reason": "top boundary needs refinement"}, 
+            {"id": 4, "reason": "right boundary needs refinement"}
+        ]}
 
-    def pgen(self, patch_rgb: np.ndarray, instance: str, key_cues: str) -> Dict[str, Any]:
-        _ = (instance, key_cues)
-        # Use mean intensity as a weak signal to produce stable scores
-        m = float(np.mean(patch_rgb)) / 255.0
-        conf = max(0.0, min(1.0, 1.2 * (m - 0.4)))  # favor mid/bright patches a bit
-        is_target = conf > 0.55
-        return {"is_target": is_target, "conf": conf}
+    def quadrant_edits(self, quadrant_crop_rgb: np.ndarray, instance: str, anchor_id: int) -> Dict[str, Any]:
+        _ = (instance, anchor_id)
+        # 简单模式：区域2添加正点，区域4添加负点
+        return {"anchor_id": int(anchor_id), "edits": [
+            {"region_id": 2, "action": "pos", "why": "foreground region"}, 
+            {"region_id": 4, "action": "neg", "why": "background region"}
+        ]}
 

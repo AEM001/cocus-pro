@@ -30,7 +30,7 @@ import os
 import numpy as np
 
 from .base import VLMBase, try_parse_json
-from .prompts import build_peval_prompt, build_pgen_prompt
+from .prompts import build_anchor_prompt, build_quadrant_prompt
 
 
 def _to_png_bytes(img_rgb: np.ndarray) -> bytes:
@@ -67,27 +67,37 @@ class QwenVLM(VLMBase):
         self._model = None       # The actual model instance
         self._processor = None   # The processor instance
 
-    # -------- public API --------
-    def peval(self, image_overlay_rgb: np.ndarray, depth_vis: Optional[np.ndarray], instance: str) -> Dict[str, Any]:
-        prompts = build_peval_prompt(instance)
-        text = self._inference([image_overlay_rgb], prompts["system"], prompts["user"])  # type: ignore
-        data = try_parse_json(text)
-        # sane defaults
-        data.setdefault("missing_parts", [])
-        data.setdefault("over_segments", [])
-        data.setdefault("boundary_quality", "")
-        data.setdefault("key_cues", [])
-        return data
+    # -------- 重构后的API，只支持anchor/quadrant指导 --------
 
-    def pgen(self, patch_rgb: np.ndarray, instance: str, key_cues: str) -> Dict[str, Any]:
-        prompts = build_pgen_prompt(instance, key_cues)
-        text = self._inference([patch_rgb], prompts["system"], prompts["user"])  # type: ignore
+    def choose_anchors(self, image_with_anchors_rgb: np.ndarray, instance: str) -> Dict[str, Any]:
+        prompts = build_anchor_prompt(instance)
+        text = self._inference([image_with_anchors_rgb], prompts["system"], prompts["user"])  # type: ignore
         data = try_parse_json(text)
-        # normalize
-        is_target = bool(data.get("is_target", False))
-        conf = float(data.get("conf", 0.0))
-        conf = max(0.0, min(1.0, conf))
-        return {"is_target": is_target, "conf": conf}
+        anchors = data.get("anchors_to_refine", [])
+        norm = []
+        for it in anchors:
+            try:
+                norm.append({"id": int(it.get("id", 0)), "reason": str(it.get("reason", ""))})
+            except Exception:
+                pass
+        return {"anchors_to_refine": norm}
+
+    def quadrant_edits(self, quadrant_crop_rgb: np.ndarray, instance: str, anchor_id: int) -> Dict[str, Any]:
+        prompts = build_quadrant_prompt(instance, anchor_id)
+        text = self._inference([quadrant_crop_rgb], prompts["system"], prompts["user"])  # type: ignore
+        data = try_parse_json(text)
+        edits = data.get("edits", [])
+        norm = []
+        for it in edits:
+            try:
+                rid = int(it.get("region_id", 0))
+                act = str(it.get("action", ""))
+                why = str(it.get("why", ""))
+                if rid in (1, 2, 3, 4) and act in ("pos", "neg"):
+                    norm.append({"region_id": rid, "action": act, "why": why})
+            except Exception:
+                pass
+        return {"anchor_id": int(anchor_id), "edits": norm}
 
     # -------- internal helpers --------
     def _inference(self, images: list[np.ndarray], system: str, user: str) -> str:
