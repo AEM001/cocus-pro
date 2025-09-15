@@ -1,12 +1,14 @@
 {
   "missing_parts": [
-    "upper part of fish"
+    "...",
+    "..."
   ],
   "over_segments": [
-    "sand texture"
+    "...",
+    "..."
   ],
-  "boundary_quality": "soft",
+  "boundary_quality": "sharp",
   "key_cues": [
-    "shape and texture of fish body"
+    "shape/texture/depth cues for the true object"
   ]
 }
