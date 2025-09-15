@@ -446,8 +446,8 @@ def main():
             new_mask = sam.predict(I, P, L, B, prev_mask=current_mask)
             
             # Check for early stopping
-            if early_stop(current_mask, new_mask, iou_tol=0.005):
-                print(f"[INFO] Early stopping at round {t} (IoU change < 0.005)")
+            if early_stop(current_mask, new_mask, iou_tol=0.005, require_pos_points=True, used_pos_count=len(pos), min_round=1, current_round=t):
+                print(f"[INFO] Early stopping at round {t} (IoU change < 0.005 and conditions met)")
                 current_mask = new_mask
                 history.append({"round": t, "num_pos": len(pos), "num_neg": len(neg), "early_stop": True})
                 break

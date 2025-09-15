@@ -7,13 +7,17 @@
     995.0,
     639.0
   ],
-  "rounds_completed": 1,
+  "rounds_completed": 2,
   "history": [
     {
       "round": 0,
+      "num_pos": 1,
+      "num_neg": 6
+    },
+    {
+      "round": 1,
       "num_pos": 0,
-      "num_neg": 6,
-      "early_stop": true
+      "num_neg": 6
     }
   ],
   "model": "qwen",

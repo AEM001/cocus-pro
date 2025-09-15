@@ -62,7 +62,17 @@ class SamPredictorWrapper:
             return prev_mask
 
 
-def early_stop(prev_mask: np.ndarray, new_mask: np.ndarray, iou_tol: float = 0.005) -> bool:
+def early_stop(prev_mask: np.ndarray, new_mask: np.ndarray, iou_tol: float = 0.005, *, require_pos_points: bool = False, used_pos_count: int = 0, min_round: int = 1, current_round: int = 0) -> bool:
+    """
+    Decide early stopping based on IoU delta, with guards to prevent premature stop:
+    - require_pos_points: only consider stopping if at least one positive point was used
+    - min_round: enforce a minimum number of rounds before stopping
+    - current_round: index of the current round (0-based)
+    """
+    if current_round < min_round:
+        return False
+    if require_pos_points and used_pos_count <= 0:
+        return False
     p = (prev_mask > 0).astype(np.uint8)
     n = (new_mask > 0).astype(np.uint8)
     inter = (p & n).sum()

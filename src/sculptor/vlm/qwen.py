@@ -57,11 +57,12 @@ class QwenVLM(VLMBase):
     - gen_max_new_tokens: generation cap to reduce memory/time
     """
 
-    def __init__(self, mode: str = "server", server_url: Optional[str] = None, model_dir: Optional[str] = None, gen_max_new_tokens: int = 96):
+    def __init__(self, mode: str = "server", server_url: Optional[str] = None, model_dir: Optional[str] = None, gen_max_new_tokens: int = 96, do_sample: bool = False):
         self.mode = mode
         self.server_url = server_url or "http://127.0.0.1:8000/generate"
         self.model_dir = model_dir
         self.gen_max_new_tokens = int(gen_max_new_tokens)
+        self.do_sample = bool(do_sample)
         self._local_model = None  # Will be set to True after successful loading
         self._model = None       # The actual model instance
         self._processor = None   # The processor instance
@@ -121,19 +122,19 @@ class QwenVLM(VLMBase):
             
         try:
             import torch
+            from PIL import Image
+            try:
+                from qwen_vl_utils import process_vision_info
+            except Exception:
+                process_vision_info = None
             # Convert numpy images to PIL Images
-            pil_images = []
-            for img in images:
-                from PIL import Image
-                pil_img = Image.fromarray(img.astype(np.uint8))
-                pil_images.append(pil_img)
+            pil_images = [Image.fromarray(img.astype(np.uint8)) for img in images]
             
             # Prepare messages in Qwen2.5-VL format
             content = []
             for pil_img in pil_images:
                 content.append({"type": "image", "image": pil_img})
             content.append({"type": "text", "text": user})
-            
             messages = [
                 {"role": "system", "content": system},
                 {"role": "user", "content": content}
@@ -144,25 +145,38 @@ class QwenVLM(VLMBase):
                 messages, tokenize=False, add_generation_prompt=True
             )
             
-            # Process inputs
+            # Process inputs per Qwen docs
+            image_inputs = None
+            video_inputs = None
+            if process_vision_info is not None:
+                image_inputs, video_inputs = process_vision_info(messages)
+            else:
+                image_inputs = pil_images if pil_images else None
+                video_inputs = None
             inputs = self._processor(
-                text=[text], 
-                images=pil_images if pil_images else None, 
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
                 return_tensors="pt",
-                padding=True
+                padding=True,
             )
             
             # Move to device
             inputs = inputs.to(self._model.device)
             
-            # Generate response
+            # Generate response (greedy by default to avoid CUDA multinomial assertions)
+            gen_kwargs = {
+                "max_new_tokens": int(self.gen_max_new_tokens),
+                "pad_token_id": self._processor.tokenizer.eos_token_id,
+                "eos_token_id": self._processor.tokenizer.eos_token_id,
+                "do_sample": bool(self.do_sample),
+            }
+            if self.do_sample:
+                gen_kwargs.update({"temperature": 0.4, "top_p": 0.9})
             with torch.inference_mode():
                 generated_ids = self._model.generate(
                     **inputs,
-                    max_new_tokens=int(self.gen_max_new_tokens),
-                    do_sample=True,
-                    temperature=0.1,
-                    pad_token_id=self._processor.tokenizer.eos_token_id
+                    **gen_kwargs,
                 )
             
             # Decode response
@@ -186,8 +200,8 @@ class QwenVLM(VLMBase):
             return
             
         try:
-            from transformers import AutoModelForVision2Seq, AutoProcessor
-            from transformers import AutoConfig
+            from transformers import AutoProcessor
+            from transformers import Qwen2_5_VLForConditionalGeneration
             import torch
             
             print(f"[INFO] Loading Qwen2.5-VL-AWQ model from {self.model_dir}")
@@ -201,17 +215,14 @@ class QwenVLM(VLMBase):
             # Load processor and model
             self._processor = AutoProcessor.from_pretrained(
                 self.model_dir,
-                trust_remote_code=True
             )
             
-            # Load model (works for 3B/7B). Prefer FP16 on CUDA, CPU fallback otherwise.
-            import torch
+            # Load model (3B/7B). Prefer FP16 on CUDA, CPU fallback otherwise.
             dtype = torch.float16 if torch.cuda.is_available() else None
-            self._model = AutoModelForVision2Seq.from_pretrained(
+            self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.model_dir,
                 torch_dtype=dtype,
                 device_map="auto",
-                trust_remote_code=True,
             )
             self._model.eval()
             
