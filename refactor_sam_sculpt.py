@@ -149,6 +149,21 @@ def project_point_to_contour(point: Tuple[float, float], contour: np.ndarray) ->
     return (float(closest_point[0]), float(closest_point[1]))
 
 
+def _contour_orientation_sign(contour: np.ndarray) -> float:
+    """返回轮廓方向符号 (CCW=+1, CW=-1)。退化情况默认+1。"""
+    if contour.ndim == 3:
+        contour = contour.reshape(-1, 2)
+    if len(contour) < 3:
+        return 1.0
+
+    xs = contour[:, 0].astype(float)
+    ys = contour[:, 1].astype(float)
+    rolled_xs = np.roll(xs, -1)
+    rolled_ys = np.roll(ys, -1)
+    signed_area = np.sum(xs * rolled_ys - ys * rolled_xs) * 0.5
+    return 1.0 if signed_area >= 0 else -1.0
+
+
 def get_anchor_points(roi_box: ROIBox) -> List[Tuple[float, float]]:
     """获取ROI框的8个锚点坐标 (4角 + 4边中点)"""
     x0, y0, x1, y1 = roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1
@@ -392,11 +407,13 @@ def create_tangent_square_visualization(image: np.ndarray, anchor_point: Tuple[f
     main_contour = extract_main_contour(mask)
     if len(main_contour) > 0:
         tangent_dx, tangent_dy = get_contour_tangent_at_point(anchor_point, main_contour)
+        orientation = _contour_orientation_sign(main_contour)
     else:
         tangent_dx, tangent_dy = 1.0, 0.0  # 默认水平方向
+        orientation = 1.0
 
     # 计算法线方向（垂直于切线，指向内侧）
-    normal_dx, normal_dy = -tangent_dy, tangent_dx
+    normal_dx, normal_dy = -tangent_dy * orientation, tangent_dx * orientation
 
     # 计算正方形的四个角点
     # 以切线和法线方向为基础构建正方形
