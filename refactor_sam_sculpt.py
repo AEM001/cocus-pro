@@ -149,17 +149,6 @@ def project_point_to_contour(point: Tuple[float, float], contour: np.ndarray) ->
     return (float(closest_point[0]), float(closest_point[1]))
 
 
-def get_anchor_points(roi_box: ROIBox) -> List[Tuple[float, float]]:
-    """获取ROI框的8个锚点坐标 (4角 + 4边中点)"""
-    x0, y0, x1, y1 = roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1
-    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-
-    return [
-        (x0, y0), (cx, y0), (x1, y0),  # 1,2,3: 左上，上中，右上
-        (x1, cy),                       # 4: 右中
-        (x1, y1), (cx, y1), (x0, y1),   # 5,6,7: 右下，下中，左下
-        (x0, cy),                       # 8: 左中
-    ]
 
 
 def find_line_contour_intersections(line_start: Tuple[float, float], line_end: Tuple[float, float], contour: np.ndarray) -> List[Tuple[float, float]]:
@@ -197,15 +186,22 @@ def find_line_contour_intersections(line_start: Tuple[float, float], line_end: T
     return intersections
 
 
-def get_line_based_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, float]]:
-    """基于BBox连线与轮廓交点的锚点生成方法"""
+def get_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, float]]:
+    """基于BBox连线与轮廓交点的锚点生成方法（原 get_line_based_anchor_points）"""
     # 提取主轮廓
     main_contour = extract_main_contour(mask)
 
-    # 如果没有轮廓，返回原始锚点
+    # 如果没有轮廓，返回基础锚点作为fallback
     if len(main_contour) == 0:
-        print("[WARN] 未找到主轮廓，使用原始锚点")
-        return get_anchor_points(roi_box)
+        print("[WARN] 未找到主轮廓，使用基础锚点")
+        x0, y0, x1, y1 = roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        return [
+            (x0, y0), (cx, y0), (x1, y0),  # 1,2,3: 左上，上中，右上
+            (x1, cy),                       # 4: 右中
+            (x1, y1), (cx, y1), (x0, y1),   # 5,6,7: 右下，下中，左下
+            (x0, cy),                       # 8: 左中
+        ]
 
     x0, y0, x1, y1 = roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -228,34 +224,48 @@ def get_line_based_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tupl
         intersections = find_line_contour_intersections(line_start, line_end, main_contour)
         all_intersections.extend(intersections)
 
-    # 如果交点不足，使用原始锚点作为补充
+    # 如果交点不足，使用基础锚点作为补充
     if len(all_intersections) < 8:
-        print(f"[INFO] 找到 {len(all_intersections)} 个交点，使用原始锚点补充")
-        original_anchors = get_anchor_points(roi_box)
+        print(f"[INFO] 找到 {len(all_intersections)} 个交点，使用基础锚点补充")
+        x0, y0, x1, y1 = roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        fallback_anchors = [
+            (x0, y0), (cx, y0), (x1, y0),  # 1,2,3: 左上，上中，右上
+            (x1, cy),                       # 4: 右中
+            (x1, y1), (cx, y1), (x0, y1),   # 5,6,7: 右下，下中，左下
+            (x0, cy),                       # 8: 左中
+        ]
 
-        # 使用交点作为前几个锚点，剩余用原始锚点填充
+        # 使用交点作为前几个锚点，剩余用基础锚点填充
         result_anchors = all_intersections[:]
         for i in range(len(all_intersections), 8):
-            if i < len(original_anchors):
-                result_anchors.append(original_anchors[i])
+            if i < len(fallback_anchors):
+                result_anchors.append(fallback_anchors[i])
     else:
         # 如果交点过多，选择8个最具代表性的点
         # 按照与BBox角点和边中点的距离进行选择
-        original_anchors = get_anchor_points(roi_box)
+        x0, y0, x1, y1 = roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        reference_anchors = [
+            (x0, y0), (cx, y0), (x1, y0),  # 1,2,3: 左上，上中，右上
+            (x1, cy),                       # 4: 右中
+            (x1, y1), (cx, y1), (x0, y1),   # 5,6,7: 右下，下中，左下
+            (x0, cy),                       # 8: 左中
+        ]
         result_anchors = []
 
-        for orig_anchor in original_anchors:
-            # 找到距离原始锚点最近的交点
+        for ref_anchor in reference_anchors:
+            # 找到距离参考锚点最近的交点
             if all_intersections:
                 distances = [
-                    (ix - orig_anchor[0])**2 + (iy - orig_anchor[1])**2
+                    (ix - ref_anchor[0])**2 + (iy - ref_anchor[1])**2
                     for ix, iy in all_intersections
                 ]
                 closest_idx = np.argmin(distances)
                 closest_intersection = all_intersections.pop(closest_idx)
                 result_anchors.append(closest_intersection)
             else:
-                result_anchors.append(orig_anchor)
+                result_anchors.append(ref_anchor)
 
     # 打印调试信息
     for i, anchor in enumerate(result_anchors[:8]):
@@ -264,27 +274,6 @@ def get_line_based_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tupl
     return result_anchors[:8]
 
 
-def get_projected_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, float]]:
-    """获取贴边投影后的8个锚点坐标（投影到轮廓上）"""
-    # 首先获取原始锚点
-    original_anchors = get_anchor_points(roi_box)
-    
-    # 提取主轮廓
-    main_contour = extract_main_contour(mask)
-    
-    # 如果没有轮廓，返回原始锚点
-    if len(main_contour) == 0:
-        print("[WARN] 未找到主轮廓，使用原始锚点")
-        return original_anchors
-    
-    # 将每个锚点投影到轮廓上
-    projected_anchors = []
-    for i, anchor in enumerate(original_anchors):
-        projected_point = project_point_to_contour(anchor, main_contour)
-        projected_anchors.append(projected_point)
-        print(f"锚点 {i+1}: ({anchor[0]:.1f}, {anchor[1]:.1f}) -> ({projected_point[0]:.1f}, {projected_point[1]:.1f})")
-    
-    return projected_anchors
 
 
 def draw_anchors_on_image(image: np.ndarray, roi_box: ROIBox, mask: np.ndarray) -> np.ndarray:
@@ -310,7 +299,7 @@ def draw_anchors_on_image(image: np.ndarray, roi_box: ROIBox, mask: np.ndarray) 
     cv2.rectangle(vis_img, (int(roi_box.x0), int(roi_box.y0)), (int(roi_box.x1), int(roi_box.y1)), (255, 0, 0), box_th)
 
     # 使用基于连线交点的锚点
-    projected_anchor_points = get_line_based_anchor_points(roi_box, mask)
+    projected_anchor_points = get_anchor_points(roi_box, mask)
     radius = int(max(5, min(16, base_len / 25.0)))
     font_scale, text_th = _auto_font_and_thickness(base_len)
     
@@ -558,11 +547,47 @@ def get_sector_center(circle_bounds: Tuple[int, int, int, int, float], region_id
         return (cx, cy)
 
 
+def calculate_smart_roi_expansion(roi_box: ROIBox, pos_points: List[Tuple[float, float]], 
+                                   square_size: float, image_shape: Tuple[int, int]) -> ROIBox:
+    """根据正点提示智能调整ROI框，向相应边的外侧扩展小正方形的边长"""
+    if not pos_points:
+        return roi_box  # 没有正点，不扩展
+    
+    H, W = image_shape
+    expanded_roi = ROIBox(roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1)
+    
+    for px, py in pos_points:
+        # 判断正点相对于原ROI的位置，决定扩展方向
+        
+        # 左边扩展：如果正点在ROI左边界外侧
+        if px < roi_box.x0:
+            expanded_roi.x0 = max(0, min(expanded_roi.x0, px - square_size / 2))
+            print(f"[扩展] 左边界扩展至 {expanded_roi.x0:.1f} (正点位置: {px:.1f})")
+            
+        # 右边扩展：如果正点在ROI右边界外侧  
+        if px > roi_box.x1:
+            expanded_roi.x1 = min(W, max(expanded_roi.x1, px + square_size / 2))
+            print(f"[扩展] 右边界扩展至 {expanded_roi.x1:.1f} (正点位置: {px:.1f})")
+            
+        # 上边扩展：如果正点在ROI上边界外侧
+        if py < roi_box.y0:
+            expanded_roi.y0 = max(0, min(expanded_roi.y0, py - square_size / 2))
+            print(f"[扩展] 上边界扩展至 {expanded_roi.y0:.1f} (正点位置: {py:.1f})")
+            
+        # 下边扩展：如果正点在ROI下边界外侧
+        if py > roi_box.y1:
+            expanded_roi.y1 = min(H, max(expanded_roi.y1, py + square_size / 2))
+            print(f"[扩展] 下边界扩展至 {expanded_roi.y1:.1f} (正点位置: {py:.1f})")
+    
+    return expanded_roi
+
+
 def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box: ROIBox,
                           pos_points: List[Tuple[float, float]],
                           neg_points: List[Tuple[float, float]],
-                          prev_mask: np.ndarray) -> np.ndarray:
-    """步骤4: 使用正负点进行SAM分割优化"""
+                          prev_mask: np.ndarray,
+                          square_size: float = 0.0) -> np.ndarray:
+    """步骤4: 使用正负点进行SAM分割优化，支持智能BBox扩展"""
     predictor.set_image(image)
 
     # 组合所有点和标签
@@ -572,10 +597,22 @@ def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box:
     if not all_points:
         return prev_mask
 
+    # 智能调整ROI框：如果有正点在原BBox外，则扩展BBox
+    H, W = image.shape[:2]
+    smart_roi = calculate_smart_roi_expansion(roi_box, pos_points, square_size, (H, W))
+    
+    # 打印调整信息
+    if (smart_roi.x0 != roi_box.x0 or smart_roi.y0 != roi_box.y0 or 
+        smart_roi.x1 != roi_box.x1 or smart_roi.y1 != roi_box.y1):
+        print(f"[智能调整] ROI从 ({roi_box.x0:.1f},{roi_box.y0:.1f},{roi_box.x1:.1f},{roi_box.y1:.1f}) ")
+        print(f"           扩展至 ({smart_roi.x0:.1f},{smart_roi.y0:.1f},{smart_roi.x1:.1f},{smart_roi.y1:.1f})")
+    else:
+        print(f"[智能调整] ROI无需扩展，保持原尺寸")
+
     masks, scores, logits = predictor.predict(
         point_coords=np.array(all_points),
         point_labels=np.array(all_labels),
-        box=np.array([roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1]),
+        box=np.array([smart_roi.x0, smart_roi.y0, smart_roi.x1, smart_roi.y1]),
         multimask_output=True,
     )
 
@@ -583,9 +620,8 @@ def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box:
     best_idx = np.argmax(scores)
     best_mask = masks[best_idx]
 
-    # 裁剪到ROI区域
-    H, W = image.shape[:2]
-    x0, y0, x1, y1 = int(roi_box.x0), int(roi_box.y0), int(roi_box.x1), int(roi_box.y1)
+    # 使用扩展后的ROI进行裁剪（允许超出原BBox）
+    x0, y0, x1, y1 = int(smart_roi.x0), int(smart_roi.y0), int(smart_roi.x1), int(smart_roi.y1)
     clipped_mask = np.zeros((H, W), dtype=np.uint8)
     clipped_mask[y0:y1, x0:x1] = (best_mask[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
 
@@ -689,7 +725,7 @@ def main():
         all_pos_points = []
         all_neg_points = []
         # 使用基于连线交点的锚点
-        projected_anchor_points = get_line_based_anchor_points(roi_box, current_mask)
+        projected_anchor_points = get_anchor_points(roi_box, current_mask)
 
         for anchor_info in selected_anchors:
             anchor_id = int(anchor_info.get('id', 0))
@@ -729,14 +765,20 @@ def main():
         print("[INFO] 卸载VLM模型释放内存...")
         vlm.unload_model()
 
-        # 步骤4: 使用收集的点进行sam分割
+        # 计算小正方形的尺寸（用于智能扩展BBox）
+        roi_width = roi_box.x1 - roi_box.x0
+        roi_height = roi_box.y1 - roi_box.y0
+        square_size = max(120.0, float(args.ratio) * float(min(roi_width, roi_height)))
+        
+        # 步骤4: 使用收集的点进行sam分割（支持智能BBox扩展）
         if all_pos_points or all_neg_points:
             print(f"步骤4: 使用 {len(all_pos_points)} 个正点和 {len(all_neg_points)} 个负点进行分割...")
+            print(f"[参数] 小正方形尺寸: {square_size:.1f} px （用于智能扩展BBox）")
             # 清理GPU缓存以释放内存
             import torch
             torch.cuda.empty_cache()
             current_mask = refine_mask_with_points(predictor, image, roi_box,
-                                                 all_pos_points, all_neg_points, current_mask)
+                                                 all_pos_points, all_neg_points, current_mask, square_size)
             save_image(os.path.join(output_dir, f'step4_round{round_idx + 1}_refined_mask.png'), current_mask)
             print(f"优化后掩码像素数: {np.sum(current_mask > 0)}")
         else:

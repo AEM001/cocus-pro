@@ -1,1 +1,1 @@
-python refactor_sam_sculpt.py --name f --qwen_dir /home/albert/code/CV/models/Qwen2.5-VL-3B-Instruct --ratio 1.0 --anchors_per_round 1 --vlm_max_side 720 --rounds 5
+python refactor_sam_sculpt.py --name f --qwen_dir /home/albert/code/CV/models/Qwen2.5-VL-3B-Instruct --ratio 0.5 --anchors_per_round 1 --vlm_max_side 720 --rounds 3
