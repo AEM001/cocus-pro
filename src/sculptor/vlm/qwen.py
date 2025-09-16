@@ -90,13 +90,27 @@ class QwenVLM(VLMBase):
         data = try_parse_json(text)
         anchors = data.get("anchors_to_refine", [])
 
-        # Normalize if available
+        # Normalize if available; support optional score and keep order (ranked best-first)
         norm: list[dict] = []
         for it in anchors if isinstance(anchors, (list, tuple)) else []:
             try:
-                norm.append({"id": int(it.get("id", 0)), "reason": str(it.get("reason", ""))})
+                aid = int(it.get("id", 0))
+                rsn = str(it.get("reason", ""))
+                sc = it.get("score", None)
+                try:
+                    sc = float(sc) if sc is not None else None
+                except Exception:
+                    sc = None
+                norm.append({"id": aid, "reason": rsn, **({"score": sc} if sc is not None else {})})
             except Exception:
                 pass
+
+        # If score exists, sort by score desc while preserving given order for ties
+        if norm and any("score" in a for a in norm):
+            norm = sorted(
+                norm,
+                key=lambda x: (-(x.get("score", -1.0)), ),
+            )
 
         # Heuristic salvage if empty
         if not norm:
@@ -180,10 +194,22 @@ class QwenVLM(VLMBase):
             result["anchors_to_refine"] = []
         
         # 验证每个锚点的格式
+        valid = []
         for i, anchor in enumerate(result["anchors_to_refine"]):
-            if not isinstance(anchor, dict) or 'id' not in anchor:
+            if isinstance(anchor, dict) and 'id' in anchor:
+                try:
+                    anchor['id'] = int(anchor['id'])
+                    if 'score' in anchor:
+                        try:
+                            anchor['score'] = float(anchor['score'])
+                        except Exception:
+                            anchor.pop('score', None)
+                    valid.append(anchor)
+                except Exception:
+                    print(f"[ERROR] Invalid anchor id at index {i}")
+            else:
                 print(f"[ERROR] Invalid anchor format at index {i}, removing")
-                result["anchors_to_refine"].pop(i)
+        result["anchors_to_refine"] = valid
         
         return result
 

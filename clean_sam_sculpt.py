@@ -612,6 +612,12 @@ def main():
 
     # 迭代优化
     max_rounds = int(args.rounds)
+
+    # 最近一次选择与效果，用于重复降权
+    prev_selected_anchor_id: Optional[int] = None
+    prev_change_pixels: Optional[int] = None
+    min_change_threshold = 500  # 小于该像素变化视为收益很小，可考虑替换为次优候选
+
     for round_idx in range(max_rounds):
         print(f"\n=== 第 {round_idx + 1} 轮优化 ===")
 
@@ -628,11 +634,37 @@ def main():
         anchor_vis_vlm = _resize_for_vlm(anchor_vis, int(args.vlm_max_side))
         anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name, global_reason=semantic_reason)
         selected_anchors = anchor_response.get('anchors_to_refine', [])
+
+        # 选择逻辑：支持top-k，默认使用第一个；若与上一轮相同且上一轮收益很小，则尝试次优候选
+        chosen_anchor = None
+        if isinstance(selected_anchors, list) and selected_anchors:
+            chosen_anchor = selected_anchors[0]
+            if prev_selected_anchor_id is not None and prev_change_pixels is not None:
+                same_as_prev = int(chosen_anchor.get('id', -1)) == int(prev_selected_anchor_id)
+                if same_as_prev and prev_change_pixels < min_change_threshold and len(selected_anchors) > 1:
+                    # 可选：仅当次优评分不明显更差时才替换（差距<=0.05）
+                    top_score = chosen_anchor.get('score', None)
+                    for alt in selected_anchors[1:]:
+                        alt_id = int(alt.get('id', -1))
+                        if not (1 <= alt_id <= 8):
+                            continue
+                        if alt_id == prev_selected_anchor_id:
+                            continue
+                        alt_score = alt.get('score', None)
+                        if top_score is None or alt_score is None or float(alt_score) >= float(top_score) - 0.05:
+                            print(f"[去重降权] 上一轮锚点{prev_selected_anchor_id}改变量较小({prev_change_pixels}px)，本轮优先改用次优候选锚点{alt_id}")
+                            chosen_anchor = alt
+                            break
+            # 最终仅使用一个锚点进入后续流程
+            selected_anchors = [chosen_anchor]
         
-        # VLM现在应该只返回一个锚点，但保持兼容性，只取第一个
-        if len(selected_anchors) > 1:
-            print(f"[INFO] VLM返回了{len(selected_anchors)}个锚点，但只使用第一个最重要的")
-            selected_anchors = selected_anchors[:1]
+        # VLM现在可能返回多个锚点，保持兼容：如果依然为空则fallback
+        if not selected_anchors:
+            print("[WARN] VLM未选择任何锚点，使用fallback策略选择锚点1")
+            print(f"[DEBUG] VLM原始响应: '{anchor_response.get('raw_text', 'N/A')}'")
+            fallback_anchor = {"id": 1, "reason": "fallback selection when VLM returned empty"}
+            selected_anchors = [fallback_anchor]
+            print(f"[INFO] 使用fallback锚点: {selected_anchors}")
 
         # Fallback: if VLM returns no anchors, use a default anchor to keep pipeline going
         if not selected_anchors:
@@ -727,11 +759,17 @@ def main():
             # 清理GPU缓存以释放内存
             import torch
             torch.cuda.empty_cache()
+            # 在分割前保存旧掩码以计算变化像素
+            old_mask = (current_mask > 0).astype(np.uint8)
             current_mask, updated_roi_box = refine_mask_with_points(
                 predictor, image, roi_box,
                 all_pos_points, all_neg_points, current_mask, square_size,
                 allowed_update_mask=allowed_update_mask,
             )
+            # 记录本轮掩码变化像素数（仅用于下一轮的去重降权判断）
+            new_mask_bin = (current_mask > 0).astype(np.uint8)
+            change_pixels = int(np.sum(old_mask ^ new_mask_bin))
+            print(f"[变化] 本轮掩码改变像素: {change_pixels}")
             # 更新ROI框供下一轮使用
             if (updated_roi_box.x0 != roi_box.x0 or updated_roi_box.y0 != roi_box.y0 or 
                 updated_roi_box.x1 != roi_box.x1 or updated_roi_box.y1 != roi_box.y1):
@@ -740,8 +778,15 @@ def main():
             
             save_image(os.path.join(output_dir, f'round{round_idx + 1}_step4_refined_mask.png'), current_mask)
             print(f"优化后掩码像素数: {np.sum(current_mask > 0)}")
+
+            # 记录用于下一轮的重复降权信息（本轮实际使用的锚点）
+            if selected_anchors:
+                prev_selected_anchor_id = int(selected_anchors[0].get('id', -1))
+                prev_change_pixels = change_pixels
         else:
             print("未生成任何点，跳过本轮优化")
+            # 若无点生成，则视为变化为0
+            prev_change_pixels = 0
 
     # 保存最终结果
     save_image(os.path.join(output_dir, 'final_result.png'), current_mask)

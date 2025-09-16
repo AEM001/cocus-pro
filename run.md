@@ -12,7 +12,7 @@ python refactor_sam_sculpt.py --name f --max_anchor_uses 1
 # 每个锚点可以使用3次（宽松模式）  
 python refactor_sam_sculpt.py --name f --max_anchor_uses 3
 
-python refactor_sam_sculpt.py --name f --ratio 0.6 --vlm_max_side 1024 --rounds 5 
+python clean_sam_sculpt.py --name f --ratio 0.6 --vlm_max_side 720 --rounds 5 
 
 
 
