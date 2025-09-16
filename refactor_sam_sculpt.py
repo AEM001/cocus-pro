@@ -792,19 +792,27 @@ def main():
         if all_pos_points or all_neg_points:
             print(f"步骤4: 使用 {len(all_pos_points)} 个正点和 {len(all_neg_points)} 个负点进行分割...")
             print(f"[参数] 小正方形尺寸: {square_size:.1f} px （用于智能扩展BBox）")
-            # 构建局部更新门控掩码（允许在本轮涉及到的切线正方形窗口内更新）
+            # 构建严格的局部更新门控掩码（仅允许被选中锚点周围的小范围更新）
             H, W = image.shape[:2]
             allowed_update_mask = np.zeros((H, W), dtype=np.uint8)
-            # 合理的余量，允许轮廓在窗口外稍作延展
-            margin = int(max(6, min(32, square_size * 0.25)))
-            for (L, T, R, Btm) in update_windows:
-                x0m = max(0, L - margin)
-                y0m = max(0, T - margin)
-                x1m = min(W, R + margin)
-                y1m = min(H, Btm + margin)
-                allowed_update_mask[y0m:y1m, x0m:x1m] = 1
+            
+            # 对每个被选中的锚点，创建更小的圆形更新区域
+            anchor_radius = int(max(20, min(60, square_size * 1.1)))  # 比原来的正方形要小得多
+            
+            for anchor_info in selected_anchors:
+                anchor_id = int(anchor_info.get('id', 0))
+                if 1 <= anchor_id <= 8:
+                    # 获取锚点的实际坐标
+                    anchor_x, anchor_y = projected_anchor_points[anchor_id - 1]
+                    
+                    # 创建以锚点为中心的圆形更新区域
+                    cy, cx = np.ogrid[:H, :W]
+                    dist_from_anchor = np.sqrt((cx - anchor_x)**2 + (cy - anchor_y)**2)
+                    circle_mask = dist_from_anchor <= anchor_radius
+                    allowed_update_mask[circle_mask] = 1
+                    
             updated_area = int(allowed_update_mask.sum())
-            print(f"[门控] 本轮允许更新的像素区域: {updated_area}（带margin={margin}px）")
+            print(f"[严格门控] 本轮仅允许被选中锚点周围 {anchor_radius}px 半径内更新，共 {updated_area} 像素")
 
             # 清理GPU缓存以释放内存
             import torch

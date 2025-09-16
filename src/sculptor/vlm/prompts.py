@@ -26,26 +26,36 @@ def build_anchor_prompt(
     )
 
     user_msg = f"""
-Target instance (canonical, singular): '{instance}'
+CAMOUFLAGED TARGET: '{instance}'
+This is a CAMOUFLAGED object that naturally blends with its environment. The target may have:
+- Similar colors/textures to the background
+- Irregular, organic shapes that mimic surroundings  
+- Subtle boundaries that are hard to distinguish
+- Parts that appear to "fade into" or "emerge from" the background
+
+Camouflage analysis context:
 Synonyms/aliases: {_fmt_list(sem.get('synonyms'))}
-Salient cues (positive): {_fmt_list(sem.get('salient_cues'))}
-Distractors (background lookalikes): {_fmt_list(sem.get('distractors'))}
-Shape prior: {sem.get('shape_prior') or "unknown"}
-Texture/color prior: {_fmt_list(sem.get('texture_prior'))}
-Scene context: {sem.get('scene_context') or "unknown"}
-NOT-target parts to avoid: {_fmt_list(sem.get('not_target_parts'))}
+Key identifying features: {_fmt_list(sem.get('salient_cues'))}
+Background mimics/distractors: {_fmt_list(sem.get('distractors'))}
+Typical shape: {sem.get('shape_prior') or "unknown"}
+Texture/color patterns: {_fmt_list(sem.get('texture_prior'))}
+Environment: {sem.get('scene_context') or "unknown"}
+Avoid including: {_fmt_list(sem.get('not_target_parts'))}
 
-Green overlay = current mask within the ROI. Anchors 1..8 are placed around boundary.
-Your goal: choose up to {K} anchors to refine so the mask better matches ONLY the target instance.
+CURRENT STATE: Green overlay shows the current mask. Anchors 1..8 mark potential refinement points.
+TASK: Select up to {K} anchors where the camouflaged {instance} boundary needs correction.
 
-Internal evaluation checklist (DO NOT OUTPUT):
-1) Semantic gating: prefer anchors where local pattern matches the target cues and conflicts with distractors.
-2) Leakage vs Missing:
-   - If green spills onto background patterns -> intent="fix_leak".
-   - If true target parts (texture/shape continuity) are missing -> intent="recover_miss".
-3) Geometry sanity: respect silhouette continuity along tangent; avoid breaking plausible outline.
-4) Uncertainty fallback: if unsure, output exactly one anchor with the most plausible intent.
-5) Never propose anchors outside the ROI or on clearly NOT-target parts.
+For CAMOUFLAGED targets, focus on:
+1) Subtle texture transitions - look for slight differences in pattern/grain between target and background
+2) Biological boundaries - camouflaged animals often have natural body contours despite blending
+3) Depth/shadow cues - slight 3D form indicators that reveal the hidden shape
+4) Consistency - camouflaged parts should connect logically to already-identified portions
+
+Decision criteria (DO NOT OUTPUT):
+- LEAK: Green mask extends onto clear background patterns that don't belong to the {instance}
+- MISS: Obvious {instance} body parts are not included, breaking biological continuity
+- Look for SUBTLE but consistent textural/tonal differences at boundaries
+- Trust shape continuity over perfect color matching for camouflaged subjects
 
 Return JSON STRICTLY:
 {{
@@ -92,23 +102,28 @@ def build_quadrant_prompt(
     )
 
     user_msg = f"""
-Target instance (canonical): '{instance}'
-Synonyms: {_fmt_list(sem.get('synonyms'))}
-Salient cues: {_fmt_list(sem.get('salient_cues'))}
-Distractors: {_fmt_list(sem.get('distractors'))}
-NOT-target parts: {_fmt_list(sem.get('not_target_parts'))}
+CAMOUFLAGED TARGET: '{instance}'
+Key features: {_fmt_list(sem.get('salient_cues'))}
+Background mimics: {_fmt_list(sem.get('distractors'))}
+Avoid: {_fmt_list(sem.get('not_target_parts'))}
 
-Focus anchor id: {anchor_id}. A square region centered at this anchor point is divided by the contour's tangent line into two areas:
-- Region 1 (Inner): The side toward the object interior
-- Region 2 (Outer): The side toward the background/exterior
+Focus on anchor {anchor_id}. The square region is divided by the current boundary into:
+- Region 1 (Inner): Toward the {instance} body/interior
+- Region 2 (Outer): Toward the background/environment
 
-Internal decision rubric (DO NOT OUTPUT):
-- POS if the region contains target texture/pattern that should be included in the mask
-- NEG if the region contains background patterns, distractors, or should be excluded from the mask
-- You MUST select exactly one region (either inner or outer, not both)
-- Choose the action (pos/neg) that will most improve the segmentation quality
-- Inner regions typically get POS when object extends inward; NEG when mask over-includes
-- Outer regions typically get NEG when background leaks in; POS when object extends outward
+For CAMOUFLAGED {instance}, examine CLOSELY:
+- Subtle texture/grain differences between target and background
+- Natural body contours vs environmental patterns
+- Consistent biological form vs random background elements
+- Slight tonal/depth variations that reveal the hidden shape
+
+Decision logic (DO NOT OUTPUT):
+- POS: This region contains {instance} body parts that should be included (even if camouflaged)
+- NEG: This region contains background/environment that mimics the {instance} but isn't actually part of it
+- CRITICAL: For camouflaged subjects, trust biological/anatomical continuity over pure visual similarity
+- Inner regions: POS if {instance} extends inward naturally; NEG if mask wrongly includes background
+- Outer regions: NEG if background patterns leak in; POS if {instance} extends outward naturally
+- When uncertain between similar textures, consider: Does this follow the expected {instance} body structure?
 
 Return JSON STRICTLY:
 {{
