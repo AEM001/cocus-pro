@@ -113,6 +113,42 @@ def generate_initial_sam_mask(predictor: SamPredictor, image: np.ndarray, roi_bo
     return clipped_mask
 
 
+def extract_main_contour(mask: np.ndarray) -> np.ndarray:
+    """从二值掩码提取主轮廓"""
+    # 确保掩码是二值的
+    binary_mask = (mask > 0).astype(np.uint8)
+    
+    # 查找轮廓
+    contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    
+    if not contours:
+        # 如果没有找到轮廓，返回空数组
+        return np.array([])
+    
+    # 选择面积最大的轮廓作为主轮廓
+    main_contour = max(contours, key=cv2.contourArea)
+    
+    # 将轮廓点reshape为 (N, 2) 的形式
+    return main_contour.squeeze(axis=1) if len(main_contour.shape) == 3 else main_contour
+
+
+def project_point_to_contour(point: Tuple[float, float], contour: np.ndarray) -> Tuple[float, float]:
+    """将点投影到最近的轮廓点"""
+    if len(contour) == 0:
+        return point
+    
+    px, py = float(point[0]), float(point[1])
+    
+    # 计算到所有轮廓点的距离
+    distances = np.sqrt((contour[:, 0] - px) ** 2 + (contour[:, 1] - py) ** 2)
+    
+    # 找到最近的点
+    min_idx = np.argmin(distances)
+    closest_point = contour[min_idx]
+    
+    return (float(closest_point[0]), float(closest_point[1]))
+
+
 def get_anchor_points(roi_box: ROIBox) -> List[Tuple[float, float]]:
     """获取ROI框的8个锚点坐标 (4角 + 4边中点)"""
     x0, y0, x1, y1 = roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1
@@ -126,99 +162,150 @@ def get_anchor_points(roi_box: ROIBox) -> List[Tuple[float, float]]:
     ]
 
 
+def get_projected_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, float]]:
+    """获取贴边投影后的8个锚点坐标（投影到轮廓上）"""
+    # 首先获取原始锚点
+    original_anchors = get_anchor_points(roi_box)
+    
+    # 提取主轮廓
+    main_contour = extract_main_contour(mask)
+    
+    # 如果没有轮廓，返回原始锚点
+    if len(main_contour) == 0:
+        print("[WARN] 未找到主轮廓，使用原始锚点")
+        return original_anchors
+    
+    # 将每个锚点投影到轮廓上
+    projected_anchors = []
+    for i, anchor in enumerate(original_anchors):
+        projected_point = project_point_to_contour(anchor, main_contour)
+        projected_anchors.append(projected_point)
+        print(f"锚点 {i+1}: ({anchor[0]:.1f}, {anchor[1]:.1f}) -> ({projected_point[0]:.1f}, {projected_point[1]:.1f})")
+    
+    return projected_anchors
+
+
 def draw_anchors_on_image(image: np.ndarray, roi_box: ROIBox, mask: np.ndarray) -> np.ndarray:
-    """步骤2: 简洁版锚点图（自适应字号）"""
+    """步骤2: 简洁版锚点图（去除绿色覆盖，仅显示轮廓和锚点）"""
     vis_img = image.copy()
 
-    # 掩码覆盖（绿色）
-    vis_img[mask > 0] = vis_img[mask > 0] * 0.6 + np.array([0, 255, 0]) * 0.4
+    # 提取并绘制轮廓
+    main_contour = extract_main_contour(mask)
+    if len(main_contour) > 0:
+        # 绘制轮廓线（黄色，较粗）
+        roi_w = roi_box.x1 - roi_box.x0
+        roi_h = roi_box.y1 - roi_box.y0
+        base_len = float(min(roi_w, roi_h))
+        _, contour_th = _auto_font_and_thickness(base_len)
+        contour_th = max(2, contour_th)
+        cv2.drawContours(vis_img, [main_contour.reshape(-1, 1, 2).astype(np.int32)], -1, (0, 255, 255), contour_th)
 
-    # ROI框
+    # ROI框（蓝色边框）
     roi_w = roi_box.x1 - roi_box.x0
     roi_h = roi_box.y1 - roi_box.y0
     base_len = float(min(roi_w, roi_h))
     _, box_th = _auto_font_and_thickness(base_len)
     cv2.rectangle(vis_img, (int(roi_box.x0), int(roi_box.y0)), (int(roi_box.x1), int(roi_box.y1)), (255, 0, 0), box_th)
 
-    # 锚点与编号
-    anchor_points = get_anchor_points(roi_box)
+    # 使用贴边投影后的锚点
+    projected_anchor_points = get_projected_anchor_points(roi_box, mask)
     radius = int(max(5, min(16, base_len / 25.0)))
     font_scale, text_th = _auto_font_and_thickness(base_len)
-    for i, (x, y) in enumerate(anchor_points, 1):
-        cv2.circle(vis_img, (int(x), int(y)), radius, (0, 255, 255), -1)
-        cv2.putText(vis_img, str(i), (int(x) + radius + 4, int(y) - radius - 2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), text_th)
+    
+    for i, (x, y) in enumerate(projected_anchor_points, 1):
+        # 绘制锚点圆点（红色）
+        cv2.circle(vis_img, (int(x), int(y)), radius, (0, 0, 255), -1)
+        # 绘制编号（白色文字，黑色边框）
+        text_x = int(x) + radius + 4
+        text_y = int(y) - radius - 2
+        # 添加黑色边框使数字更清晰
+        cv2.putText(vis_img, str(i), (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), text_th + 2)
+        cv2.putText(vis_img, str(i), (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), text_th)
 
     return vis_img
 
 
 def create_quadrant_visualization(image: np.ndarray, anchor_point: Tuple[float, float],
                                 roi_box: ROIBox, mask: np.ndarray, anchor_id: int,
-                                ratio: float = 0.8) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
-    """步骤3: 简洁版象限可视化（自适应字号，位置纠正）"""
-    # 计算方形区域大小（相对ROI，适中比例）
+                                ratio: float = 0.8) -> Tuple[np.ndarray, Tuple[int, int, int, int, float]]:
+    """步骤3: 圆形扇形分割可视化（替代原方形象限）"""
+    # 计算圆形区域半径（相对ROI，适中比例）
     roi_width = roi_box.x1 - roi_box.x0
     roi_height = roi_box.y1 - roi_box.y0
-    square_size = max(120.0, float(ratio) * float(min(roi_width, roi_height)))
+    base_size = max(120.0, float(ratio) * float(min(roi_width, roi_height)))
+    radius = base_size / 2.0
 
-    # 以锚点为中心构造正方形，边界裁剪并确保仍为正方形
+    # 以锚点为圆心
     cx, cy = float(anchor_point[0]), float(anchor_point[1])
-    half = square_size / 2.0
-    L = max(0, int(round(cx - half)))
-    T = max(0, int(round(cy - half)))
-    R = min(int(image.shape[1]), int(round(cx + half)))
-    Btm = min(int(image.shape[0]), int(round(cy + half)))
-    side = min(R - L, Btm - T)
-    if side <= 0:
-        side = int(max(60, square_size))
-    # 重新居中，使其为正方形
-    L = max(0, int(round(cx - side / 2.0)))
-    T = max(0, int(round(cy - side / 2.0)))
-    R = min(int(image.shape[1]), L + side)
-    Btm = min(int(image.shape[0]), T + side)
+    
+    # 计算包围盒用于返回
+    L = max(0, int(round(cx - radius)))
+    T = max(0, int(round(cy - radius)))
+    R = min(int(image.shape[1]), int(round(cx + radius)))
+    Btm = min(int(image.shape[0]), int(round(cy + radius)))
 
     vis = image.copy()
-    vis[mask > 0] = vis[mask > 0] * 0.6 + np.array([0, 255, 0]) * 0.4
+    # 提取并绘制轮廓（不再使用绿色覆盖）
+    main_contour = extract_main_contour(mask)
+    if len(main_contour) > 0:
+        base_len = float(min(roi_width, roi_height))
+        _, contour_th = _auto_font_and_thickness(base_len)
+        contour_th = max(2, contour_th)
+        cv2.drawContours(vis, [main_contour.reshape(-1, 1, 2).astype(np.int32)], -1, (0, 255, 255), contour_th // 2)
 
     # 线宽与字体
-    font_scale, thick = _auto_font_and_thickness(side)
+    font_scale, thick = _auto_font_and_thickness(radius * 2)
     line_th = max(2, thick)
 
-    # 边框与分割线
-    cv2.rectangle(vis, (L, T), (R, Btm), (0, 255, 255), line_th)
-    cx_i = (L + R) // 2
-    cy_i = (T + Btm) // 2
-    cv2.line(vis, (cx_i, T), (cx_i, Btm), (0, 255, 255), line_th)
-    cv2.line(vis, (L, cy_i), (R, cy_i), (0, 255, 255), line_th)
+    # 绘制圆形边框
+    cv2.circle(vis, (int(cx), int(cy)), int(radius), (0, 255, 255), line_th)
+    
+    # 绘制十字分割线（将圆分成四个扇形）
+    # 水平线
+    cv2.line(vis, (int(cx - radius), int(cy)), (int(cx + radius), int(cy)), (0, 255, 255), line_th)
+    # 垂直线
+    cv2.line(vis, (int(cx), int(cy - radius)), (int(cx), int(cy + radius)), (0, 255, 255), line_th)
 
-    # 象限标签（单色、简洁）
+    # 计算四个扇形的中心点位置（在半径的2/3处）
+    sector_r = radius * 2.0 / 3.0  # 标签位置在边缘的 2/3 处
     centers = [
-        ( (L + cx_i) // 2, (T + cy_i) // 2 ),      # 1 TL
-        ( (cx_i + R) // 2, (T + cy_i) // 2 ),      # 2 TR
-        ( (cx_i + R) // 2, (cy_i + Btm) // 2 ),    # 3 BR
-        ( (L + cx_i) // 2, (cy_i + Btm) // 2 ),    # 4 BL
+        (cx - sector_r * 0.707, cy - sector_r * 0.707),  # 1: 左上 (315度方向)
+        (cx + sector_r * 0.707, cy - sector_r * 0.707),  # 2: 右上 (45度方向)
+        (cx + sector_r * 0.707, cy + sector_r * 0.707),  # 3: 右下 (135度方向)
+        (cx - sector_r * 0.707, cy + sector_r * 0.707),  # 4: 左下 (225度方向)
     ]
+    
+    # 绘制扇形标签
     for j, (px, py) in enumerate(centers, 1):
-        cv2.putText(vis, str(j), (int(px), int(py)), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 255), thick)
+        # 添加黑色边框使数字更清晰
+        cv2.putText(vis, str(j), (int(px), int(py)), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thick + 2)
+        cv2.putText(vis, str(j), (int(px), int(py)), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 0), thick)
 
-    return vis, (L, T, R, Btm)
+    return vis, (L, T, R, Btm, radius)
 
 
-def get_quadrant_center(square_bounds: Tuple[int, int, int, int], region_id: int) -> Tuple[float, float]:
-    """获取指定象限的中心点坐标"""
-    x_min, y_min, x_max, y_max = square_bounds
-    mid_x = (x_min + x_max) / 2
-    mid_y = (y_min + y_max) / 2
-
-    if region_id == 1:  # 左上
-        return ((x_min + mid_x) / 2, (y_min + mid_y) / 2)
-    elif region_id == 2:  # 右上
-        return ((mid_x + x_max) / 2, (y_min + mid_y) / 2)
-    elif region_id == 3:  # 右下
-        return ((mid_x + x_max) / 2, (mid_y + y_max) / 2)
-    elif region_id == 4:  # 左下
-        return ((x_min + mid_x) / 2, (mid_y + y_max) / 2)
+def get_sector_center(circle_bounds: Tuple[int, int, int, int, float], region_id: int, anchor_point: Tuple[float, float]) -> Tuple[float, float]:
+    """获取指定扇形的中心点坐标"""
+    x_min, y_min, x_max, y_max, radius = circle_bounds
+    cx, cy = float(anchor_point[0]), float(anchor_point[1])
+    
+    # 在每个扇形的中心方向上，距离圆心 radius/2 的位置放置点
+    sector_r = radius / 2.0  # 点位置在半径的 1/2 处
+    
+    if region_id == 1:  # 左上扇形 (315度方向)
+        angle = -45.0 * np.pi / 180.0  # -45度转换为弧度
+        return (cx + sector_r * np.cos(angle), cy + sector_r * np.sin(angle))
+    elif region_id == 2:  # 右上扇形 (45度方向)
+        angle = 45.0 * np.pi / 180.0
+        return (cx + sector_r * np.cos(angle), cy + sector_r * np.sin(angle))
+    elif region_id == 3:  # 右下扇形 (135度方向)
+        angle = 135.0 * np.pi / 180.0
+        return (cx + sector_r * np.cos(angle), cy + sector_r * np.sin(angle))
+    elif region_id == 4:  # 左下扇形 (225度方向)
+        angle = 225.0 * np.pi / 180.0
+        return (cx + sector_r * np.cos(angle), cy + sector_r * np.sin(angle))
     else:
-        return (mid_x, mid_y)
+        return (cx, cy)
 
 
 def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box: ROIBox,
@@ -351,21 +438,23 @@ def main():
         # 收集所有正负点
         all_pos_points = []
         all_neg_points = []
-        anchor_points = get_anchor_points(roi_box)
+        # 使用贴边投影后的锚点
+        projected_anchor_points = get_projected_anchor_points(roi_box, current_mask)
 
         for anchor_info in selected_anchors:
             anchor_id = int(anchor_info.get('id', 0))
             if not (1 <= anchor_id <= 8):
                 continue
 
-            anchor_point = anchor_points[anchor_id - 1]
+            # 使用贴边投影后的锚点位置
+            anchor_point = projected_anchor_points[anchor_id - 1]
 
-            # 步骤3: 创建象限可视化vlm_max_side
-            print(f"步骤3: 为锚点 {anchor_id} 创建象限...")
-            quad_vis, square_bounds = create_quadrant_visualization(
+            # 步骤3: 创建扇形可视化
+            print(f"步骤3: 为锚点 {anchor_id} 创建扇形...")
+            quad_vis, circle_bounds = create_quadrant_visualization(
                 image, anchor_point, roi_box, current_mask, anchor_id, ratio=float(args.ratio)
             )
-            save_image(os.path.join(output_dir, f'step3_round{round_idx + 1}_anchor{anchor_id}_quadrants.png'), quad_vis)
+            save_image(os.path.join(output_dir, f'step3_round{round_idx + 1}_anchor{anchor_id}_sectors.png'), quad_vis)
 
             # 传给VLM前缩放
             quad_vis_vlm = _resize_for_vlm(quad_vis, int(args.vlm_max_side))
@@ -380,7 +469,7 @@ def main():
                 action = str(edit.get('action', ''))
 
                 if region_id in [1, 2, 3, 4] and action in ['pos', 'neg']:
-                    point = get_quadrant_center(square_bounds, region_id)
+                    point = get_sector_center(circle_bounds, region_id, anchor_point)
                     if action == 'pos':
                         all_pos_points.append(point)
                     else:
