@@ -42,26 +42,32 @@ Texture/color patterns: {_fmt_list(sem.get('texture_prior'))}
 Environment: {sem.get('scene_context') or "unknown"}
 Avoid including: {_fmt_list(sem.get('not_target_parts'))}
 
-CURRENT STATE: Green overlay shows the current mask. Anchors 1..8 mark potential refinement points.
+CURRENT STATE: Yellow contour shows the current mask boundary. Anchors 1..8 mark potential refinement points.
 TASK: Select EXACTLY ONE anchor - the MOST CRITICAL point where the camouflaged {instance} boundary needs correction.
 
-PRIORITY STRATEGY: Choose the single anchor that will have the MAXIMUM IMPACT on segmentation quality:
-1) MOST OBVIOUS ERROR: Prefer anchors at locations with clear boundary mistakes (major leaks or missing parts)
-2) HIGHEST CONFIDENCE: Select the anchor where you are most certain about the correction needed
-3) BIOLOGICAL IMPORTANCE: Favor anchors at anatomically significant boundaries (head, fins, limbs)
-4) LARGEST IMPROVEMENT: Choose the anchor that will correct the most pixels with one refinement
+CRITICAL ANALYSIS: Focus on the RELATIONSHIP between {instance} and background:
+- OBJECT vs BACKGROUND: Does the current boundary correctly separate the {instance} from its environment?
+- CAMOUFLAGE PATTERNS: The {instance} may share similar colors/textures with background but has distinct biological structure
+- NATURAL BOUNDARIES: Look for anatomical edges (body outline, fins, limbs) rather than just color changes
+- TEXTURE COHERENCE: {instance} body parts should have consistent organic texture, while background shows environmental patterns
 
-For CAMOUFLAGED targets, focus on:
-- Subtle texture transitions - look for slight differences in pattern/grain between target and background
-- Biological boundaries - camouflaged animals often have natural body contours despite blending
-- Depth/shadow cues - slight 3D form indicators that reveal the hidden shape
-- Consistency - camouflaged parts should connect logically to already-identified portions
+PRIORITY STRATEGY - Choose the anchor with MAXIMUM BIOLOGICAL SIGNIFICANCE:
+1) ANATOMICAL BOUNDARIES: Prefer anchors where {instance} body structure meets background (not just color transitions)
+2) STRUCTURAL CONTINUITY: Select points that will restore natural {instance} body shape and proportions
+3) CAMOUFLAGE vs REALITY: Distinguish between background mimicry and actual {instance} body parts
+4) FUNCTIONAL ANATOMY: Prioritize biologically important features (head, main body, appendages)
+
+For CAMOUFLAGED {instance}, distinguish:
+- REAL {instance} PARTS: Organic textures, natural body curves, anatomical consistency
+- BACKGROUND ELEMENTS: Environmental patterns, random textures, non-biological shapes
+- TRANSITION ZONES: Where {instance} naturally meets its habitat
 
 Decision criteria (DO NOT OUTPUT):
-- LEAK: Green mask extends onto clear background patterns that don't belong to the {instance}
-- MISS: Obvious {instance} body parts are not included, breaking biological continuity
-- Look for SUBTLE but consistent textural/tonal differences at boundaries
-- Trust shape continuity over perfect color matching for camouflaged subjects
+- ANATOMICAL LEAK: Mask incorrectly includes background elements that mimic {instance} but lack biological structure
+- BIOLOGICAL MISS: Actual {instance} body parts are excluded, breaking anatomical continuity
+- STRUCTURAL ANALYSIS: Prioritize natural {instance} body shape over superficial color similarities
+- HABITAT INTEGRATION: Consider how {instance} naturally interacts with its environment
+- ORGANIC vs INORGANIC: Distinguish living tissue patterns from environmental textures
 
 Return JSON STRICTLY:
 {{
@@ -118,19 +124,19 @@ Focus on anchor {anchor_id}. The square region is divided by the current boundar
 - Region 1 (Inner): Toward the {instance} body/interior
 - Region 2 (Outer): Toward the background/environment
 
-For CAMOUFLAGED {instance}, examine CLOSELY:
-- Subtle texture/grain differences between target and background
-- Natural body contours vs environmental patterns
-- Consistent biological form vs random background elements
-- Slight tonal/depth variations that reveal the hidden shape
+For CAMOUFLAGED {instance}, analyze the BIOLOGICAL REALITY:
+- ANATOMICAL STRUCTURE: Does this region show natural {instance} body organization?
+- ORGANIC PATTERNS: Distinguish living tissue textures from environmental mimicry
+- FUNCTIONAL ANATOMY: Consider {instance} body proportions and natural shape
+- HABITAT RELATIONSHIP: How does the {instance} naturally interface with its environment?
 
 Decision logic (DO NOT OUTPUT):
-- POS: This region contains {instance} body parts that should be included (even if camouflaged)
-- NEG: This region contains background/environment that mimics the {instance} but isn't actually part of it
-- CRITICAL: For camouflaged subjects, trust biological/anatomical continuity over pure visual similarity
-- Inner regions: POS if {instance} extends inward naturally; NEG if mask wrongly includes background
-- Outer regions: NEG if background patterns leak in; POS if {instance} extends outward naturally
-- When uncertain between similar textures, consider: Does this follow the expected {instance} body structure?
+- POS: This region contains ACTUAL {instance} anatomy (organic structure, not just similar colors)
+- NEG: This region shows background/habitat that may mimic {instance} but lacks biological structure
+- BIOLOGICAL PRIMACY: Trust anatomical evidence over superficial visual similarities
+- Inner regions: POS if shows {instance} internal body structure; NEG if background intrusion
+- Outer regions: NEG if environmental elements; POS if natural {instance} body extension
+- KEY QUESTION: Is this part of the living {instance} organism or just environmental mimicry?
 
 Return JSON STRICTLY:
 {{

@@ -70,7 +70,17 @@ class QwenVLM(VLMBase):
     # -------- 重构后的API，只支持anchor/quadrant指导 --------
 
     def choose_anchors(self, image_with_anchors_rgb: np.ndarray, instance: str, global_reason: Optional[str] = None) -> Dict[str, Any]:
-        prompts = build_anchor_prompt(instance, global_reason)
+        # 构建语义上下文（如果提供）
+        semantic_context = None
+        if global_reason:
+            semantic_context = {
+                'salient_cues': [f'{instance} anatomical features', 'natural body contours', 'organic textures'],
+                'distractors': ['background camouflage patterns', 'environmental mimicry', 'habitat elements'],
+                'shape_prior': f'natural {instance} body structure and proportions',
+                'scene_context': f'{instance} in natural camouflaged habitat'
+            }
+        
+        prompts = build_anchor_prompt(instance, global_reason, semantic=semantic_context)
         text = self._inference([image_with_anchors_rgb], prompts["system"], prompts["user"])  # type: ignore
         
         # DEBUG: Print raw VLM response
@@ -162,10 +172,33 @@ class QwenVLM(VLMBase):
                     print(f"[DEBUG] No anchor pattern found in response")
         
         print(f"[DEBUG] Final anchors count: {len(norm)}")
-        return {"anchors_to_refine": norm, "raw_text": text}
+        
+        # 安全性检查：确保返回的格式符合API期望
+        result = {"anchors_to_refine": norm, "raw_text": text}
+        if not isinstance(result.get("anchors_to_refine"), list):
+            print("[ERROR] anchors_to_refine is not a list, using empty list")
+            result["anchors_to_refine"] = []
+        
+        # 验证每个锚点的格式
+        for i, anchor in enumerate(result["anchors_to_refine"]):
+            if not isinstance(anchor, dict) or 'id' not in anchor:
+                print(f"[ERROR] Invalid anchor format at index {i}, removing")
+                result["anchors_to_refine"].pop(i)
+        
+        return result
 
     def quadrant_edits(self, quadrant_crop_rgb: np.ndarray, instance: str, anchor_id: int, global_reason: Optional[str] = None, anchor_reason: Optional[str] = None) -> Dict[str, Any]:
-        prompts = build_quadrant_prompt(instance, anchor_id, global_reason, anchor_hint=anchor_reason)
+        # 构建语义上下文（如果提供）
+        semantic_context = None
+        if global_reason:
+            semantic_context = {
+                'salient_cues': [f'{instance} anatomical structures', 'biological boundaries', 'organic patterns'],
+                'distractors': ['environmental textures', 'background camouflage', 'habitat patterns'],
+                'shape_prior': f'natural {instance} anatomy and form',
+                'scene_context': f'{instance} blending with natural habitat'
+            }
+        
+        prompts = build_quadrant_prompt(instance, anchor_id, global_reason, semantic=semantic_context, anchor_hint=anchor_reason)
         text = self._inference([quadrant_crop_rgb], prompts["system"], prompts["user"])  # type: ignore
         
         # DEBUG: Print raw VLM response
@@ -237,7 +270,20 @@ class QwenVLM(VLMBase):
                     print(f"[DEBUG] JSON fix attempt failed: {e}")
         
         print(f"[DEBUG] Final edits count for anchor {anchor_id}: {len(norm)}")
-        return {"anchor_id": int(anchor_id), "edits": norm, "raw_text": text}
+        
+        # 安全性检查：确保返回的格式符合API期望
+        result = {"anchor_id": int(anchor_id), "edits": norm, "raw_text": text}
+        if not isinstance(result.get("edits"), list):
+            print(f"[ERROR] edits is not a list for anchor {anchor_id}, using empty list")
+            result["edits"] = []
+        
+        # 验证每个编辑指令的格式
+        for i, edit in enumerate(result["edits"]):
+            if not isinstance(edit, dict) or 'region_id' not in edit or 'action' not in edit:
+                print(f"[ERROR] Invalid edit format at index {i} for anchor {anchor_id}, removing")
+                result["edits"].pop(i)
+        
+        return result
 
     # -------- internal helpers --------
     def _inference(self, images: list[np.ndarray], system: str, user: str) -> str:

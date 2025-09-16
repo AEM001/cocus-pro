@@ -253,18 +253,22 @@ def get_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, fl
 
 def draw_anchors_on_image(image: np.ndarray, roi_box: ROIBox, mask: np.ndarray) -> np.ndarray:
     """步骤2: 简洁版锚点图（去除绿色覆盖，仅显示轮廓和锚点）"""
+    anchor_points = get_anchor_points(roi_box, mask)
+    return draw_anchors_on_image_with_points(image, roi_box, mask, anchor_points)
+
+
+def draw_anchors_on_image_with_points(image: np.ndarray, roi_box: ROIBox, mask: np.ndarray, 
+                                     anchor_points: List[Tuple[float, float]]) -> np.ndarray:
+    """使用预计算的锚点位置绘制锚点图，确保位置一致性"""
     vis_img = image.copy()
 
-    # 提取并绘制轮廓
-    main_contour = extract_main_contour(mask)
-    if len(main_contour) > 0:
-        # 绘制轮廓线（黄色，较粗）
-        roi_w = roi_box.x1 - roi_box.x0
-        roi_h = roi_box.y1 - roi_box.y0
-        base_len = float(min(roi_w, roi_h))
-        _, contour_th = _auto_font_and_thickness(base_len)
-        contour_th = max(2, contour_th)
-        cv2.drawContours(vis_img, [main_contour.reshape(-1, 1, 2).astype(np.int32)], -1, (0, 255, 255), contour_th)
+    # 使用绿色掩码覆盖显示当前分割区域
+    mask_overlay = (mask > 0).astype(np.uint8)
+    if np.sum(mask_overlay) > 0:
+        # 绿色半透明覆盖：原图*0.7 + 绿色*0.3
+        green_overlay = np.zeros_like(vis_img)
+        green_overlay[:, :] = [0, 255, 0]  # 纯绿色
+        vis_img[mask_overlay > 0] = vis_img[mask_overlay > 0] * 0.7 + green_overlay[mask_overlay > 0] * 0.3
 
     # ROI框（蓝色边框）
     roi_w = roi_box.x1 - roi_box.x0
@@ -273,12 +277,11 @@ def draw_anchors_on_image(image: np.ndarray, roi_box: ROIBox, mask: np.ndarray) 
     _, box_th = _auto_font_and_thickness(base_len)
     cv2.rectangle(vis_img, (int(roi_box.x0), int(roi_box.y0)), (int(roi_box.x1), int(roi_box.y1)), (255, 0, 0), box_th)
 
-    # 使用基于连线交点的锚点
-    projected_anchor_points = get_anchor_points(roi_box, mask)
+    # 使用提供的锚点位置（保证一致性）
     radius = int(max(5, min(16, base_len / 25.0)))
     font_scale, text_th = _auto_font_and_thickness(base_len)
     
-    for i, (x, y) in enumerate(projected_anchor_points, 1):
+    for i, (x, y) in enumerate(anchor_points, 1):
         # 绘制锚点圆点（红色）
         cv2.circle(vis_img, (int(x), int(y)), radius, (0, 0, 255), -1)
         # 绘制编号（白色文字，黑色边框）
@@ -384,12 +387,13 @@ def create_tangent_square_visualization(image: np.ndarray, anchor_point: Tuple[f
 
     vis = image.copy()
 
-    # 绘制轮廓
-    if len(main_contour) > 0:
-        base_len = float(min(roi_width, roi_height))
-        _, contour_th = _auto_font_and_thickness(base_len)
-        contour_th = max(2, contour_th)
-        cv2.drawContours(vis, [main_contour.reshape(-1, 1, 2).astype(np.int32)], -1, (0, 255, 255), contour_th // 2)
+    # 使用绿色掩码覆盖显示当前分割区域（更直观）
+    mask_overlay = (mask > 0).astype(np.uint8)
+    if np.sum(mask_overlay) > 0:
+        # 绿色半透明覆盖：原图*0.7 + 绿色*0.3
+        green_overlay = np.zeros_like(vis)
+        green_overlay[:, :] = [0, 255, 0]  # 纯绿色
+        vis[mask_overlay > 0] = vis[mask_overlay > 0] * 0.7 + green_overlay[mask_overlay > 0] * 0.3
 
     # 线宽与字体
     font_scale, thick = _auto_font_and_thickness(base_size)
@@ -563,14 +567,21 @@ def main():
     image_path = os.path.join(base_dir, 'auxiliary', 'images', f'{sample_name}.png')
     roi_json_path = os.path.join(base_dir, 'auxiliary', 'box_out', sample_name, f'{sample_name}_sam_boxes.json')
 
-    # 获取实例名称
+    # 加载语义信息（实例名称和推理原因）
     llm_out_path = os.path.join(base_dir, 'auxiliary', 'llm_out', f'{sample_name}_output.json')
     instance_name = sample_name
+    semantic_reason = None
     if os.path.exists(llm_out_path):
         try:
             with open(llm_out_path, 'r') as f:
-                instance_name = json.load(f).get('instance', sample_name)
-        except:
+                llm_data = json.load(f)
+                instance_name = llm_data.get('instance', sample_name)
+                semantic_reason = llm_data.get('reason', None)
+                print(f"[语义信息] 加载实例: {instance_name}")
+                if semantic_reason:
+                    print(f"[语义信息] 推理描述: {semantic_reason[:100]}...")
+        except Exception as e:
+            print(f"[WARN] 无法加载语义信息: {e}")
             pass
 
     # 输出目录
@@ -604,14 +615,18 @@ def main():
     for round_idx in range(max_rounds):
         print(f"\n=== 第 {round_idx + 1} 轮优化 ===")
 
-        # 步骤2: 绘制锚点，让VLM选择需要精修的锚点
+        # 关键修复：在每轮开始时计算一次锚点位置，全程使用这个位置
+        print("计算当前轮次的锚点位置...")
+        current_anchor_points = get_anchor_points(roi_box, current_mask)
+        
+        # 步骤2: 使用固定的锚点位置绘制锚点图，让VLM选择需要精修的锚点
         print("步骤2: 绘制锚点并请求VLM选择...")
-        anchor_vis = draw_anchors_on_image(image, roi_box, current_mask)
+        anchor_vis = draw_anchors_on_image_with_points(image, roi_box, current_mask, current_anchor_points)
         save_image(os.path.join(output_dir, f'round{round_idx + 1}_step2_anchors.png'), anchor_vis)
 
         # 传给VLM前缩放，降低显存压力
         anchor_vis_vlm = _resize_for_vlm(anchor_vis, int(args.vlm_max_side))
-        anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name)
+        anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name, global_reason=semantic_reason)
         selected_anchors = anchor_response.get('anchors_to_refine', [])
         
         # VLM现在应该只返回一个锚点，但保持兼容性，只取第一个
@@ -633,16 +648,17 @@ def main():
         all_pos_points = []
         all_neg_points = []
         
-        # 使用基于连线交点的锚点
-        projected_anchor_points = get_anchor_points(roi_box, current_mask)
+        # 使用当前轮次开始时计算的锚点位置（确保一致性）
+        print(f"[位置一致性] 使用预计算的锚点位置，确保 VLM 选择与实际处理一致")
 
         for anchor_info in selected_anchors:
             anchor_id = int(anchor_info.get('id', 0))
             if not (1 <= anchor_id <= 8):
                 continue
 
-            # 使用贴边投影后的锚点位置
-            anchor_point = projected_anchor_points[anchor_id - 1]
+            # 使用当前轮次开始时固定的锚点位置
+            anchor_point = current_anchor_points[anchor_id - 1]
+            print(f"[位置检查] 锚点{anchor_id} 使用位置: ({anchor_point[0]:.1f}, {anchor_point[1]:.1f})")
 
             # 步骤3: 创建切线内外区域可视化
             print(f"步骤3: 为锚点 {anchor_id} 创建切线内外区域...")
@@ -653,7 +669,9 @@ def main():
 
             # 传给VLM前缩放
             tangent_vis_vlm = _resize_for_vlm(tangent_vis, int(args.vlm_max_side))
-            quad_response = vlm.quadrant_edits(tangent_vis_vlm, instance_name, anchor_id)
+            anchor_reason = anchor_info.get('reason', '')
+            quad_response = vlm.quadrant_edits(tangent_vis_vlm, instance_name, anchor_id, 
+                                               global_reason=semantic_reason, anchor_reason=anchor_reason)
             edits = quad_response.get('edits', [])
 
             print(f"锚点 {anchor_id} 的编辑指令: {edits}")
@@ -694,8 +712,8 @@ def main():
             for anchor_info in selected_anchors:
                 anchor_id = int(anchor_info.get('id', 0))
                 if 1 <= anchor_id <= 8:
-                    # 获取锚点的实际坐标
-                    anchor_x, anchor_y = projected_anchor_points[anchor_id - 1]
+                    # 使用当前轮次开始时固定的锚点位置
+                    anchor_x, anchor_y = current_anchor_points[anchor_id - 1]
                     
                     # 创建以锚点为中心的圆形更新区域
                     cy, cx = np.ogrid[:H, :W]
