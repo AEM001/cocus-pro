@@ -563,6 +563,7 @@ def main():
     ap.add_argument('--ratio', type=float, default=0.8, help='square ratio to ROI short side for tangent square crop')
     ap.add_argument('--vlm_max_side', type=int, default=720, help='resize long side before sending to VLM (<=0 to disable)')
     ap.add_argument('--first_round_apply_all', action='store_true', help='In round 1, apply ALL returned anchors (batch) by generating points for each and updating mask once')
+    ap.add_argument('--second_round_apply_all', action='store_true', help='In round 2, apply ALL returned anchors (batch) similar to round 1')
     args = ap.parse_args()
 
     sample_name = args.name
@@ -660,9 +661,9 @@ def main():
         anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name, global_reason=semantic_reason)
         selected_anchors = anchor_response.get('anchors_to_refine', [])
 
-        # 首轮批处理选项：如果启用，则在第一轮对返回的全部锚点进行处理（生成象限指令并合并点）
-        first_round_batch = bool(args.first_round_apply_all) and (round_idx == 0)
-        if first_round_batch:
+        # 批处理选项：如果启用，则在指定轮次对返回的全部锚点进行处理（生成象限指令并合并点）
+        is_batch_round = (bool(args.first_round_apply_all) and round_idx == 0) or (bool(getattr(args, 'second_round_apply_all', False)) and round_idx == 1)
+        if is_batch_round:
             # 过滤非法/重复ID
             seen = set()
             batch_anchors = []
@@ -678,7 +679,7 @@ def main():
                 print("[WARN] 首轮批处理无有效锚点，使用fallback锚点1")
                 batch_anchors = [{"id": 1, "reason": "fallback for empty batch"}]
             selected_anchors = batch_anchors
-            print(f"[批处理] 首轮批量执行 {len(selected_anchors)} 个锚点: {[int(a.get('id',-1)) for a in selected_anchors]}")
+            print(f"[批处理] 第{round_idx + 1}轮批量执行 {len(selected_anchors)} 个锚点: {[int(a.get('id',-1)) for a in selected_anchors]}")
         else:
             # 选择逻辑：
             # 1) 过滤被禁用ID
