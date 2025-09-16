@@ -57,7 +57,7 @@ class QwenVLM(VLMBase):
     - gen_max_new_tokens: generation cap to reduce memory/time
     """
 
-    def __init__(self, mode: str = "server", server_url: Optional[str] = None, model_dir: Optional[str] = None, gen_max_new_tokens: int = 96, do_sample: bool = False):
+    def __init__(self, mode: str = "server", server_url: Optional[str] = None, model_dir: Optional[str] = None, gen_max_new_tokens: int = 512, do_sample: bool = False):
         self.mode = mode
         self.server_url = server_url or "http://127.0.0.1:8000/generate"
         self.model_dir = model_dir
@@ -317,9 +317,11 @@ class QwenVLM(VLMBase):
             # Generate response (greedy by default to avoid CUDA multinomial assertions)
             gen_kwargs = {
                 "max_new_tokens": int(self.gen_max_new_tokens),
-                "pad_token_id": self._processor.tokenizer.eos_token_id,
+                "pad_token_id": self._processor.tokenizer.pad_token_id or self._processor.tokenizer.eos_token_id,
                 "eos_token_id": self._processor.tokenizer.eos_token_id,
                 "do_sample": bool(self.do_sample),
+                "repetition_penalty": 1.1,  # Prevent repetitive generation
+                "no_repeat_ngram_size": 3,   # Prevent n-gram repetition
             }
             if self.do_sample:
                 gen_kwargs.update({"temperature": 0.4, "top_p": 0.9})

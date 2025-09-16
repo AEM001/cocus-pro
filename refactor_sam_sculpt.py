@@ -1104,7 +1104,7 @@ def main():
     # 初始化VLM (仅Qwen，使用本地AWQ模型)
     print("初始化VLM (Qwen)...")
     qwen_dir = args.qwen_dir or os.environ.get('QWEN_VL_MODEL_DIR', os.path.join(base_dir, 'models', 'Qwen2.5-VL-3B-Instruct'))
-    vlm = QwenVLM(mode='local', model_dir=qwen_dir, gen_max_new_tokens=128, do_sample=False)
+    vlm = QwenVLM(mode='local', model_dir=qwen_dir, gen_max_new_tokens=512, do_sample=False)
 
     # 步骤1: 生成初始SAM掩码
     print("步骤1: 生成初始SAM掩码...")

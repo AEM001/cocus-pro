@@ -20,50 +20,32 @@ def build_anchor_prompt(
     """
     sem = semantic or {}
     sys_msg = (
-        "You are a camouflaged-object segmentation assistant. "
-        "Reply with JSON only. No prose, no markdown, no trailing commas. "
-        "The JSON must be valid for Python json.loads."
+        "You are a segmentation expert. Reply ONLY with valid JSON. "
+        "No markdown, no explanations, no extra text. "
+        "Return only the JSON response."
     )
 
     user_msg = f"""
-Target instance (canonical, singular): '{instance}'
-Synonyms/aliases: {_fmt_list(sem.get('synonyms'))}
-Salient cues (positive): {_fmt_list(sem.get('salient_cues'))}
-Distractors (background lookalikes): {_fmt_list(sem.get('distractors'))}
-Shape prior: {sem.get('shape_prior') or "unknown"}
-Texture/color prior: {_fmt_list(sem.get('texture_prior'))}
-Scene context: {sem.get('scene_context') or "unknown"}
-NOT-target parts to avoid: {_fmt_list(sem.get('not_target_parts'))}
+I need you to analyze this segmentation image and select anchors to improve the mask for '{instance}'.
 
-Green overlay = current mask within the ROI. Anchors 1..8 are placed around boundary.
-Your goal: choose up to {K} anchors to refine so the mask better matches ONLY the target instance.
+The image shows numbered anchor points (1-8) around a green mask overlay. Your task: choose which anchors need refinement.
 
-Internal evaluation checklist (DO NOT OUTPUT):
-1) Semantic gating: prefer anchors where local pattern matches the target cues and conflicts with distractors.
-2) Leakage vs Missing:
-   - If green spills onto background patterns -> intent="fix_leak".
-   - If true target parts (texture/shape continuity) are missing -> intent="recover_miss".
-3) Geometry sanity: respect silhouette continuity along tangent; avoid breaking plausible outline.
-4) Uncertainty fallback: if unsure, output exactly one anchor with the most plausible intent.
-5) Never propose anchors outside the ROI or on clearly NOT-target parts.
-
-Return JSON STRICTLY:
+Return EXACTLY this JSON format:
 {{
   "anchors_to_refine": [
-    {{ "id": 1-8, "intent": "fix_leak" | "recover_miss", "reason": "short justification (no numbers)" }}
+    {{ "id": 1, "intent": "fix_leak", "reason": "brief reason" }},
+    {{ "id": 3, "intent": "recover_miss", "reason": "brief reason" }}
   ]
 }}
-Constraints:
-- 1 <= len(anchors_to_refine) <= {max(1, K)}
-- Use only ids from 1..8
-- Keep justifications short; no lists or numbering; no quotes in the text
 
-Few-shot examples (DO NOT COPY, DO NOT ECHO; FORMAT ONLY):
-Input→ (leak suspected near rock ripples)
-Output→ {{"anchors_to_refine":[{{"id":3,"intent":"fix_leak","reason":"background ripples intrude"}},{{"id":7,"intent":"recover_miss","reason":"target texture continues"}}]}}
+Rules:
+- Use anchor ids 1-8 only
+- Intent: "fix_leak" (green spills to background) or "recover_miss" (missing target parts)
+- Select 1-3 anchors maximum
+- Keep reasons short (no quotes inside text)
 
-Input→ (only one doubtful area)
-Output→ {{"anchors_to_refine":[{{"id":5,"intent":"recover_miss","reason":"missing fin edge continuity"}}]}}
+Example response:
+{{"anchors_to_refine":[{{"id":2,"intent":"fix_leak","reason":"background intrusion"}},{{"id":6,"intent":"recover_miss","reason":"missing edge"}}]}}
 """
     # 可选：把 global_reason 作为“全局上下文”补充
     if global_reason:
@@ -87,56 +69,31 @@ def build_quadrant_prompt(
     """
     sem = semantic or {}
     sys_msg = (
-        "You are a camouflaged-object segmentation assistant. "
-        "Reply with JSON only. No extra text. Valid JSON required."
+        "You are a segmentation expert. Reply ONLY with valid JSON. "
+        "No markdown, no explanations, no extra text."
     )
 
     user_msg = f"""
-Target instance (canonical): '{instance}'
-Synonyms: {_fmt_list(sem.get('synonyms'))}
-Salient cues: {_fmt_list(sem.get('salient_cues'))}
-Distractors: {_fmt_list(sem.get('distractors'))}
-NOT-target parts: {_fmt_list(sem.get('not_target_parts'))}
+Analyze this anchor point image for '{instance}' segmentation.
 
-Focus anchor id: {anchor_id}. A square region centered at this anchor point is divided by the contour's tangent line into two areas:
-- Region 1 (Inner): The side toward the object interior
-- Region 2 (Outer): The side toward the background/exterior
+The square region is divided into:
+- Region 1 (Inner): toward object interior
+- Region 2 (Outer): toward background
 
-Internal decision rubric (DO NOT OUTPUT):
-- POS if the region contains target texture/pattern that should be included in the mask
-- NEG if the region contains background patterns, distractors, or should be excluded from the mask
-- You MUST select exactly one region (either inner or outer, not both)
-- Choose the action (pos/neg) that will most improve the segmentation quality
-- Inner regions typically get POS when object extends inward; NEG when mask over-includes
-- Outer regions typically get NEG when background leaks in; POS when object extends outward
+Select ONE region and action:
+- "pos" = include this region in mask
+- "neg" = exclude this region from mask
 
-Return JSON STRICTLY:
+Return EXACTLY this JSON:
 {{
   "anchor_id": {anchor_id},
   "edits": [
-    {{ "region_id": 1 | 2, "action": "pos" | "neg", "why": "short justification" }}
-  ]
-}}
-Constraints:
-- len(edits) == 1 (exactly one region selection)
-- region_id must be 1 (inner) or 2 (outer)
-- action must be "pos" or "neg"
-- Keep 'why' brief and descriptive
-
-Few-shot examples (DO NOT COPY):
-{{
-  "anchor_id": 3,
-  "edits": [
-    {{ "region_id": 2, "action": "neg", "why": "sand ripple background leak" }}
+    {{ "region_id": 1, "action": "pos", "why": "brief reason" }}
   ]
 }}
 
-{{
-  "anchor_id": 5,
-  "edits": [
-    {{ "region_id": 1, "action": "pos", "why": "fin texture continues inward" }}
-  ]
-}}
+Example:
+{{"anchor_id":5,"edits":[{{"region_id":2,"action":"neg","why":"background leak"}}]}}
 """
     # 可选：附加来自上一轮 anchor 决策的线索
     if anchor_hint:
