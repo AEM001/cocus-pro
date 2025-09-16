@@ -586,8 +586,10 @@ def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box:
                           pos_points: List[Tuple[float, float]],
                           neg_points: List[Tuple[float, float]],
                           prev_mask: np.ndarray,
-                          square_size: float = 0.0) -> np.ndarray:
-    """步骤4: 使用正负点进行SAM分割优化，支持智能BBox扩展"""
+                          square_size: float = 0.0) -> Tuple[np.ndarray, ROIBox]:
+    """步骤4: 使用正负点进行SAM分割优化，支持智能BBox扩展
+    返回: (refined_mask, updated_roi_box)
+    """
     predictor.set_image(image)
 
     # 组合所有点和标签
@@ -595,7 +597,7 @@ def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box:
     all_labels = [1] * len(pos_points) + [0] * len(neg_points)
 
     if not all_points:
-        return prev_mask
+        return prev_mask, roi_box  # 没有点时返回原始掩码和ROI
 
     # 智能调整ROI框：如果有正点在原BBox外，则扩展BBox
     H, W = image.shape[:2]
@@ -625,7 +627,7 @@ def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box:
     clipped_mask = np.zeros((H, W), dtype=np.uint8)
     clipped_mask[y0:y1, x0:x1] = (best_mask[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
 
-    return clipped_mask
+    return clipped_mask, smart_roi  # 返回扩展后的ROI供下一轮使用
 
 
 def _resize_for_vlm(img: np.ndarray, max_side: int) -> np.ndarray:
@@ -691,7 +693,7 @@ def main():
     # 步骤1: 生成初始SAM掩码
     print("步骤1: 生成初始SAM掩码...")
     current_mask = generate_initial_sam_mask(predictor, image, roi_box)
-    save_image(os.path.join(output_dir, 'step1_initial_mask.png'), current_mask)
+    save_image(os.path.join(output_dir, 'round0_step1_initial_mask.png'), current_mask)
 
     # 迭代优化
     max_rounds = int(args.rounds)
@@ -701,7 +703,7 @@ def main():
         # 步骤2: 绘制锚点，让VLM选择需要精修的锚点
         print("步骤2: 绘制锚点并请求VLM选择...")
         anchor_vis = draw_anchors_on_image(image, roi_box, current_mask)
-        save_image(os.path.join(output_dir, f'step2_round{round_idx + 1}_anchors.png'), anchor_vis)
+        save_image(os.path.join(output_dir, f'round{round_idx + 1}_step2_anchors.png'), anchor_vis)
 
         # 传给VLM前缩放，降低显存压力
         anchor_vis_vlm = _resize_for_vlm(anchor_vis, int(args.vlm_max_side))
@@ -740,7 +742,7 @@ def main():
             quad_vis, square_bounds = create_tangent_square_visualization(
                 image, anchor_point, roi_box, current_mask, anchor_id, ratio=float(args.ratio)
             )
-            save_image(os.path.join(output_dir, f'step3_round{round_idx + 1}_anchor{anchor_id}_tangent_square.png'), quad_vis)
+            save_image(os.path.join(output_dir, f'round{round_idx + 1}_step3_anchor{anchor_id}_tangent_square.png'), quad_vis)
 
             # 传给VLM前缩放
             quad_vis_vlm = _resize_for_vlm(quad_vis, int(args.vlm_max_side))
@@ -777,9 +779,15 @@ def main():
             # 清理GPU缓存以释放内存
             import torch
             torch.cuda.empty_cache()
-            current_mask = refine_mask_with_points(predictor, image, roi_box,
-                                                 all_pos_points, all_neg_points, current_mask, square_size)
-            save_image(os.path.join(output_dir, f'step4_round{round_idx + 1}_refined_mask.png'), current_mask)
+            current_mask, updated_roi_box = refine_mask_with_points(predictor, image, roi_box,
+                                                                   all_pos_points, all_neg_points, current_mask, square_size)
+            # 更新ROI框供下一轮使用
+            if (updated_roi_box.x0 != roi_box.x0 or updated_roi_box.y0 != roi_box.y0 or 
+                updated_roi_box.x1 != roi_box.x1 or updated_roi_box.y1 != roi_box.y1):
+                print(f"[更新] 下一轮将使用新ROI: ({updated_roi_box.x0:.1f},{updated_roi_box.y0:.1f},{updated_roi_box.x1:.1f},{updated_roi_box.y1:.1f})")
+                roi_box = updated_roi_box  # 更新roi_box供下一轮使用
+            
+            save_image(os.path.join(output_dir, f'round{round_idx + 1}_step4_refined_mask.png'), current_mask)
             print(f"优化后掩码像素数: {np.sum(current_mask > 0)}")
         else:
             print("未生成任何点，跳过本轮优化")
