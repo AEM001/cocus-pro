@@ -11,10 +11,10 @@ def build_anchor_prompt(
     global_reason: Optional[str] = None,
     *,
     semantic: Optional[SemanticCtx] = None,
-    K: int = 3
+    K: int = 1
 ) -> Dict[str, str]:
     """
-    不改变原有返回结构；新增 semantic 语义块与 K（最多返回多少个 anchor）
+    默认每次只选择一个最重要的锚点，避免多个锚点同时优化导致的复杂性
     semantic 可包含键：
       - synonyms, salient_cues, distractors, shape_prior, texture_prior, scene_context, not_target_parts
     """
@@ -43,13 +43,19 @@ Environment: {sem.get('scene_context') or "unknown"}
 Avoid including: {_fmt_list(sem.get('not_target_parts'))}
 
 CURRENT STATE: Green overlay shows the current mask. Anchors 1..8 mark potential refinement points.
-TASK: Select up to {K} anchors where the camouflaged {instance} boundary needs correction.
+TASK: Select EXACTLY ONE anchor - the MOST CRITICAL point where the camouflaged {instance} boundary needs correction.
+
+PRIORITY STRATEGY: Choose the single anchor that will have the MAXIMUM IMPACT on segmentation quality:
+1) MOST OBVIOUS ERROR: Prefer anchors at locations with clear boundary mistakes (major leaks or missing parts)
+2) HIGHEST CONFIDENCE: Select the anchor where you are most certain about the correction needed
+3) BIOLOGICAL IMPORTANCE: Favor anchors at anatomically significant boundaries (head, fins, limbs)
+4) LARGEST IMPROVEMENT: Choose the anchor that will correct the most pixels with one refinement
 
 For CAMOUFLAGED targets, focus on:
-1) Subtle texture transitions - look for slight differences in pattern/grain between target and background
-2) Biological boundaries - camouflaged animals often have natural body contours despite blending
-3) Depth/shadow cues - slight 3D form indicators that reveal the hidden shape
-4) Consistency - camouflaged parts should connect logically to already-identified portions
+- Subtle texture transitions - look for slight differences in pattern/grain between target and background
+- Biological boundaries - camouflaged animals often have natural body contours despite blending
+- Depth/shadow cues - slight 3D form indicators that reveal the hidden shape
+- Consistency - camouflaged parts should connect logically to already-identified portions
 
 Decision criteria (DO NOT OUTPUT):
 - LEAK: Green mask extends onto clear background patterns that don't belong to the {instance}
@@ -64,15 +70,16 @@ Return JSON STRICTLY:
   ]
 }}
 Constraints:
-- 1 <= len(anchors_to_refine) <= {max(1, K)}
+- EXACTLY ONE anchor in the array (len(anchors_to_refine) == 1)
 - Use only ids from 1..8
 - Keep justifications short; no lists or numbering; no quotes in the text
+- Choose the MOST IMPORTANT anchor, not just any suitable one
 
 Few-shot examples (DO NOT COPY, DO NOT ECHO; FORMAT ONLY):
-Input→ (leak suspected near rock ripples)
-Output→ {{"anchors_to_refine":[{{"id":3,"intent":"fix_leak","reason":"background ripples intrude"}},{{"id":7,"intent":"recover_miss","reason":"target texture continues"}}]}}
+Input→ (major leak suspected near rock ripples at anchor 3, minor issue at anchor 7)
+Output→ {{"anchors_to_refine":[{{"id":3,"intent":"fix_leak","reason":"background ripples intrude"}}]}}
 
-Input→ (only one doubtful area)
+Input→ (missing fin edge is most critical issue)
 Output→ {{"anchors_to_refine":[{{"id":5,"intent":"recover_miss","reason":"missing fin edge continuity"}}]}}
 """
     # 可选：把 global_reason 作为“全局上下文”补充

@@ -660,7 +660,7 @@ def main():
     ap.add_argument('--name', default='f', help='sample name (e.g., f, dog, q)')
     ap.add_argument('--qwen_dir', default='/home/albert/code/CV/models/Qwen2.5-VL-3B-Instruct', help='Qwen2.5-VL model dir (3B recommended)')
     ap.add_argument('--rounds', type=int, default=4, help='refinement rounds')
-    ap.add_argument('--anchors_per_round', type=int, default=2, help='limit anchors per round to save VRAM')
+    # 移除anchors_per_round参数，因为现在VLM每次只选择一个最重要的锚点
     ap.add_argument('--ratio', type=float, default=0.8, help='square ratio to ROI short side for quadrant crop')
     ap.add_argument('--vlm_max_side', type=int, default=720, help='resize long side before sending to VLM (<=0 to disable)')
     args = ap.parse_args()
@@ -686,6 +686,7 @@ def main():
     output_dir = os.path.join(base_dir, 'outputs', 'refactor_sculpt', sample_name)
 
     print(f"=== 重构后的SAM分割流程 (样本: {sample_name}, 实例: {instance_name}) ===")
+    print("[优化策略] 使用单点优化策略: VLM每次只选择一个最重要的锚点进行精细优化")
 
     # 加载数据
     print("加载输入数据...")
@@ -721,9 +722,10 @@ def main():
         anchor_vis_vlm = _resize_for_vlm(anchor_vis, int(args.vlm_max_side))
         anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name)
         selected_anchors = anchor_response.get('anchors_to_refine', [])
-        # 限制每轮最多处理的锚点数量
-        k = max(1, int(args.anchors_per_round))
-        selected_anchors = selected_anchors[:k]
+        # VLM现在应该只返回一个锁点，但保持兼容性，只取第一个
+        if len(selected_anchors) > 1:
+            print(f"[INFO] VLM返回了{len(selected_anchors)}个锚点，但只使用第一个最重要的")
+            selected_anchors = selected_anchors[:1]
 
         # Fallback: if VLM returns no anchors, use a default anchor to keep pipeline going
         if not selected_anchors:
