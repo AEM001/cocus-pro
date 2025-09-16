@@ -77,21 +77,92 @@ class QwenVLM(VLMBase):
         print(f"[DEBUG] Raw VLM anchor response: '{text}'")
         print(f"[DEBUG] Response length: {len(text)} chars")
 
-        data = try_parse_json(text)
+        # Try to fix common issues before parsing
+        fixed_text = text.strip()
+
+        # Remove markdown code blocks if present
+        if "```json" in fixed_text:
+            json_start = fixed_text.find("{")
+            json_end = fixed_text.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                fixed_text = fixed_text[json_start:json_end]
+        elif "```" in fixed_text:
+            # Remove any remaining markdown markers
+            fixed_text = fixed_text.replace("```", "").strip()
+
+        # Fix common field name errors (be more comprehensive)
+        fixed_text = fixed_text.replace('"_anchors_to_refine"', '"anchors_to_refine"')
+        fixed_text = fixed_text.replace('"_id":', '"id":')  # Include the colon
+        fixed_text = fixed_text.replace('"_reason":', '"reason":')  # Include the colon
+        fixed_text = fixed_text.replace('"fix_leaks"', '"fix_leak"')
+        fixed_text = fixed_text.replace('"recover_misses"', '"recover_miss"')
+
+        # Try to fix truncated JSON by adding missing closures
+        if not fixed_text.endswith("}"):
+            # Handle specific incomplete patterns first
+            if fixed_text.endswith('"reason":"'):
+                # Incomplete reason field at the end
+                fixed_text += 'incomplete"'
+            elif fixed_text.endswith(':"'):
+                # Field name but no value
+                fixed_text += 'incomplete"'
+            elif fixed_text.endswith(':'):
+                # Missing value entirely
+                fixed_text += '"incomplete"'
+
+            open_braces = fixed_text.count("{")
+            close_braces = fixed_text.count("}")
+            open_brackets = fixed_text.count("[")
+            close_brackets = fixed_text.count("]")
+
+            # Add missing quotes if string is cut off
+            if fixed_text.count('"') % 2 == 1:
+                fixed_text += '"'
+
+            # Close arrays and objects as needed
+            while close_brackets < open_brackets:
+                fixed_text += "]"
+                close_brackets += 1
+            while close_braces < open_braces:
+                fixed_text += "}"
+                close_braces += 1
+
+        print(f"[DEBUG] Fixed text: '{fixed_text}'")
+
+        data = try_parse_json(fixed_text)
         anchors = data.get("anchors_to_refine", [])
 
         # Normalize if available
         norm: list[dict] = []
         for it in anchors if isinstance(anchors, (list, tuple)) else []:
             try:
-                norm.append({"id": int(it.get("id", 0)), "reason": str(it.get("reason", ""))})
-            except Exception:
-                pass
+                # Get all possible id fields
+                anchor_id = it.get("id", 0) or it.get("_id", 0)
+                intent = str(it.get("intent", "")).lower()
+                reason = str(it.get("reason", "") or it.get("_reason", ""))
+
+                # Skip entries with incomplete data
+                if not anchor_id or not intent:
+                    print(f"[DEBUG] Skipping incomplete anchor: {it}")
+                    continue
+
+                # Normalize intent values
+                if "leak" in intent or "spill" in intent:
+                    intent = "fix_leak"
+                elif "miss" in intent or "recover" in intent:
+                    intent = "recover_miss"
+
+                if anchor_id and intent in ["fix_leak", "recover_miss"]:
+                    norm.append({"id": int(anchor_id), "reason": reason, "intent": intent})
+                    print(f"[DEBUG] Successfully parsed anchor: id={anchor_id}, intent={intent}, reason={reason}")
+            except Exception as e:
+                print(f"[DEBUG] Error processing anchor: {e}")
+                continue
 
         # No fallback - raise error if parsing fails
         if not norm:
-            print(f"[ERROR] Failed to parse anchors from VLM response")
-            raise RuntimeError(f"VLM anchor selection failed. Raw response: '{text}'")
+            print(f"[ERROR] Failed to parse anchors from VLM response after fixes")
+            raise RuntimeError(f"VLM anchor selection failed. Original: '{text}', Fixed: '{fixed_text}'")
 
         print(f"[DEBUG] Final anchors count: {len(norm)}")
         return {"anchors_to_refine": norm, "raw_text": text}
@@ -104,23 +175,71 @@ class QwenVLM(VLMBase):
         print(f"[DEBUG] Raw VLM quadrant response for anchor {anchor_id}: '{text}'")
         print(f"[DEBUG] Response length: {len(text)} chars")
 
-        data = try_parse_json(text)
+        # Try to fix common issues before parsing
+        fixed_text = text.strip()
+
+        # Remove markdown code blocks if present
+        if "```json" in fixed_text:
+            json_start = fixed_text.find("{")
+            json_end = fixed_text.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                fixed_text = fixed_text[json_start:json_end]
+        elif "```" in fixed_text:
+            fixed_text = fixed_text.replace("```", "").strip()
+
+        # Fix common field name errors
+        fixed_text = fixed_text.replace('"_anchor_id"', '"anchor_id"')
+        fixed_text = fixed_text.replace('"_edits"', '"edits"')
+        fixed_text = fixed_text.replace('"_region_id"', '"region_id"')
+        fixed_text = fixed_text.replace('"_action"', '"action"')
+        fixed_text = fixed_text.replace('"_why"', '"why"')
+
+        # Try to fix truncated JSON by adding missing closures
+        if not fixed_text.endswith("}"):
+            open_braces = fixed_text.count("{")
+            close_braces = fixed_text.count("}")
+            open_brackets = fixed_text.count("[")
+            close_brackets = fixed_text.count("]")
+
+            # Add missing quotes if string is cut off
+            if fixed_text.count('"') % 2 == 1:
+                fixed_text += '"'
+
+            # Close arrays and objects as needed
+            while close_brackets < open_brackets:
+                fixed_text += "]"
+                close_brackets += 1
+            while close_braces < open_braces:
+                fixed_text += "}"
+                close_braces += 1
+
+        print(f"[DEBUG] Fixed quadrant text: '{fixed_text}'")
+
+        data = try_parse_json(fixed_text)
         edits = data.get("edits", [])
         norm = []
         for it in edits if isinstance(edits, (list, tuple)) else []:
             try:
                 rid = int(it.get("region_id", 0))
-                act = str(it.get("action", ""))
+                act = str(it.get("action", "")).lower().strip()
                 why = str(it.get("why", ""))
-                if rid in (1, 2, 3, 4) and act in ("pos", "neg"):
+
+                # Normalize action values
+                if act in ("pos", "positive", "include", "add"):
+                    act = "pos"
+                elif act in ("neg", "negative", "exclude", "remove"):
+                    act = "neg"
+
+                if rid in (1, 2) and act in ("pos", "neg"):
                     norm.append({"region_id": rid, "action": act, "why": why})
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[DEBUG] Error processing edit: {e}")
+                continue
 
         # No fallback - raise error if parsing fails
         if not norm:
-            print(f"[ERROR] Failed to parse edits from VLM response for anchor {anchor_id}")
-            raise RuntimeError(f"VLM quadrant edit failed for anchor {anchor_id}. Raw response: '{text}'")
+            print(f"[ERROR] Failed to parse edits from VLM response for anchor {anchor_id} after fixes")
+            raise RuntimeError(f"VLM quadrant edit failed for anchor {anchor_id}. Original: '{text}', Fixed: '{fixed_text}'")
 
         print(f"[DEBUG] Final edits count for anchor {anchor_id}: {len(norm)}")
         return {"anchor_id": int(anchor_id), "edits": norm, "raw_text": text}
