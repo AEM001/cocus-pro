@@ -617,6 +617,8 @@ def main():
     prev_selected_anchor_id: Optional[int] = None
     prev_change_pixels: Optional[int] = None
     min_change_threshold = 500  # 小于该像素变化视为收益很小，可考虑替换为次优候选
+    alt_score_margin = 0.05  # 次优分数容忍差距
+    banned_anchor_ids: set[int] = set()  # 本轮及后续轮次禁用的锚点ID
 
     for round_idx in range(max_rounds):
         print(f"\n=== 第 {round_idx + 1} 轮优化 ===")
@@ -635,26 +637,46 @@ def main():
         anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name, global_reason=semantic_reason)
         selected_anchors = anchor_response.get('anchors_to_refine', [])
 
-        # 选择逻辑：支持top-k，默认使用第一个；若与上一轮相同且上一轮收益很小，则尝试次优候选
+        # 选择逻辑：
+        # 1) 过滤被禁用ID
+        # 2) 默认使用过滤后列表的第一个（或原列表的第一个）
+        # 3) 若与上一轮相同且上一轮收益很小，则尝试次优候选，并将上一轮ID加入禁用列表（后续永久跳过）
         chosen_anchor = None
         if isinstance(selected_anchors, list) and selected_anchors:
-            chosen_anchor = selected_anchors[0]
+            # 过滤被禁用的候选
+            filtered = []
+            for it in selected_anchors:
+                try:
+                    aid = int(it.get('id', -1))
+                except Exception:
+                    aid = -1
+                if 1 <= aid <= 8 and aid not in banned_anchor_ids:
+                    filtered.append(it)
+            candidates = filtered if filtered else selected_anchors
+
+            chosen_anchor = candidates[0]
             if prev_selected_anchor_id is not None and prev_change_pixels is not None:
                 same_as_prev = int(chosen_anchor.get('id', -1)) == int(prev_selected_anchor_id)
-                if same_as_prev and prev_change_pixels < min_change_threshold and len(selected_anchors) > 1:
-                    # 可选：仅当次优评分不明显更差时才替换（差距<=0.05）
+                if same_as_prev and prev_change_pixels < min_change_threshold and len(candidates) > 1:
+                    # 仅当次优评分不明显更差时才替换
                     top_score = chosen_anchor.get('score', None)
-                    for alt in selected_anchors[1:]:
+                    replaced = False
+                    for alt in candidates[1:]:
                         alt_id = int(alt.get('id', -1))
                         if not (1 <= alt_id <= 8):
                             continue
                         if alt_id == prev_selected_anchor_id:
                             continue
                         alt_score = alt.get('score', None)
-                        if top_score is None or alt_score is None or float(alt_score) >= float(top_score) - 0.05:
-                            print(f"[去重降权] 上一轮锚点{prev_selected_anchor_id}改变量较小({prev_change_pixels}px)，本轮优先改用次优候选锚点{alt_id}")
+                        if top_score is None or alt_score is None or float(alt_score) >= float(top_score) - alt_score_margin:
+                            print(f"[去重降权] 上一轮锚点{prev_selected_anchor_id}改变量较小({prev_change_pixels}px)，本轮优先改用次优候选锚点{alt_id}，并将{prev_selected_anchor_id}加入禁用列表")
                             chosen_anchor = alt
+                            banned_anchor_ids.add(int(prev_selected_anchor_id))
+                            replaced = True
                             break
+                    if not replaced and filtered and filtered[0] != chosen_anchor:
+                        # 若替换失败但有过滤候选，则使用过滤后的首选
+                        chosen_anchor = filtered[0]
             # 最终仅使用一个锚点进入后续流程
             selected_anchors = [chosen_anchor]
         
