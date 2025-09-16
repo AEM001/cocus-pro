@@ -558,6 +558,417 @@ def get_sector_center(circle_bounds: Tuple[int, int, int, int, float], region_id
         return (cx, cy)
 
 
+def create_expanded_roi(roi_box: ROIBox, expansion_ratio: float = 0.2, image_shape: Tuple[int, int] = None) -> ROIBox:
+    """创建扩展的ROI区域，用于精细修改阶段"""
+    width = roi_box.x1 - roi_box.x0
+    height = roi_box.y1 - roi_box.y0
+
+    # 计算扩展量
+    expand_x = width * expansion_ratio / 2
+    expand_y = height * expansion_ratio / 2
+
+    # 扩展边界
+    expanded_x0 = roi_box.x0 - expand_x
+    expanded_y0 = roi_box.y0 - expand_y
+    expanded_x1 = roi_box.x1 + expand_x
+    expanded_y1 = roi_box.y1 + expand_y
+
+    # 确保不超出图像边界
+    if image_shape is not None:
+        H, W = image_shape
+        expanded_x0 = max(0, expanded_x0)
+        expanded_y0 = max(0, expanded_y0)
+        expanded_x1 = min(W, expanded_x1)
+        expanded_y1 = min(H, expanded_y1)
+
+    return ROIBox(expanded_x0, expanded_y0, expanded_x1, expanded_y1)
+
+
+def create_local_expansion_box(anchor_point: Tuple[float, float], region_center: Tuple[float, float],
+                               image_shape: Tuple[int, int], expansion_size: int = 100) -> Tuple[int, int, int, int]:
+    """为特定锚点和区域创建局部扩展框"""
+    H, W = image_shape
+    cx, cy = region_center
+
+    # 创建以区域中心为中心的正方形扩展框
+    half_size = expansion_size // 2
+    x0 = max(0, int(cx - half_size))
+    y0 = max(0, int(cy - half_size))
+    x1 = min(W, int(cx + half_size))
+    y1 = min(H, int(cy + half_size))
+
+    return (x0, y0, x1, y1)
+
+
+def update_roi_based_on_square_actions(roi_box: ROIBox, anchor_edits: List[tuple],
+                                       ratio: float, image_shape: Tuple[int, int]) -> ROIBox:
+    """根据正方形区域和VLM动作直接调整ROI边界"""
+    H, W = image_shape
+    new_roi = ROIBox(roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1)
+
+    adjustments_made = []
+
+    for anchor_point, square_bounds, edits in anchor_edits:
+        if not edits:
+            continue
+
+        # 解析正方形边界信息
+        L, T, R, Btm, inner_center, outer_center = square_bounds
+
+        for edit in edits:
+            region_id = int(edit.get('region_id', 0))
+            action = str(edit.get('action', ''))
+
+            if region_id not in [1, 2] or action not in ['pos', 'neg']:
+                continue
+
+            # 根据区域和动作调整ROI
+            if region_id == 1:  # 内侧区域
+                if action == 'pos':
+                    # 内侧正点：如果锚点靠近ROI边界，可能需要扩展ROI
+                    ix, iy = inner_center
+
+                    # 检查锚点是否靠近ROI边界
+                    margin = 50  # 边界阈值
+
+                    if abs(anchor_point[0] - roi_box.x0) < margin:  # 靠近左边界
+                        # 向左扩展，使用正方形的左边界
+                        extend_to = L - (roi_box.x0 - L) * ratio
+                        new_roi.x0 = max(0, min(new_roi.x0, extend_to))
+                        adjustments_made.append(f"左边界扩展至 {new_roi.x0:.1f} (内侧正点-边界)")
+
+                    elif abs(anchor_point[0] - roi_box.x1) < margin:  # 靠近右边界
+                        # 向右扩展
+                        extend_to = R + (R - roi_box.x1) * ratio
+                        new_roi.x1 = min(W, max(new_roi.x1, extend_to))
+                        adjustments_made.append(f"右边界扩展至 {new_roi.x1:.1f} (内侧正点-边界)")
+
+                    if abs(anchor_point[1] - roi_box.y0) < margin:  # 靠近上边界
+                        # 向上扩展
+                        extend_to = T - (roi_box.y0 - T) * ratio
+                        new_roi.y0 = max(0, min(new_roi.y0, extend_to))
+                        adjustments_made.append(f"上边界扩展至 {new_roi.y0:.1f} (内侧正点-边界)")
+
+                    elif abs(anchor_point[1] - roi_box.y1) < margin:  # 靠近下边界
+                        # 向下扩展
+                        extend_to = Btm + (Btm - roi_box.y1) * ratio
+                        new_roi.y1 = min(H, max(new_roi.y1, extend_to))
+                        adjustments_made.append(f"下边界扩展至 {new_roi.y1:.1f} (内侧正点-边界)")
+
+                else:  # action == 'neg'
+                    # 内侧负点：ROI应该收缩，避开这个内侧区域
+                    # 根据内侧区域位置决定收缩方向
+                    ix, iy = inner_center
+
+                    # 判断内侧区域相对于ROI的位置
+                    roi_cx = (roi_box.x0 + roi_box.x1) / 2
+                    roi_cy = (roi_box.y0 + roi_box.y1) / 2
+
+                    if ix < roi_cx - 50:  # 内侧区域在左侧，收缩左边界
+                        new_roi.x0 = max(new_roi.x0, ix)
+                        adjustments_made.append(f"左边界内缩至 {ix:.1f} (内侧负点)")
+                    elif ix > roi_cx + 50:  # 内侧区域在右侧，收缩右边界
+                        new_roi.x1 = min(new_roi.x1, ix)
+                        adjustments_made.append(f"右边界内缩至 {ix:.1f} (内侧负点)")
+
+                    if iy < roi_cy - 50:  # 内侧区域在上侧，收缩上边界
+                        new_roi.y0 = max(new_roi.y0, iy)
+                        adjustments_made.append(f"上边界内缩至 {iy:.1f} (内侧负点)")
+                    elif iy > roi_cy + 50:  # 内侧区域在下侧，收缩下边界
+                        new_roi.y1 = min(new_roi.y1, iy)
+                        adjustments_made.append(f"下边界内缩至 {iy:.1f} (内侧负点)")
+
+            else:  # region_id == 2, 外侧区域
+                if action == 'pos':
+                    # 外侧正点：ROI应该向外扩展包含这个区域
+                    ox, oy = outer_center
+
+                    # 使用ratio控制扩展激进程度
+                    expansion_factor = ratio
+
+                    # 将正方形边界作为扩展参考
+                    if ox < roi_box.x0:  # 外侧区域在左侧，扩展左边界
+                        extend_to = L - (roi_box.x0 - L) * expansion_factor
+                        new_roi.x0 = max(0, min(new_roi.x0, extend_to))
+                        adjustments_made.append(f"左边界扩展至 {new_roi.x0:.1f} (外侧正点)")
+
+                    elif ox > roi_box.x1:  # 外侧区域在右侧，扩展右边界
+                        extend_to = R + (R - roi_box.x1) * expansion_factor
+                        new_roi.x1 = min(W, max(new_roi.x1, extend_to))
+                        adjustments_made.append(f"右边界扩展至 {new_roi.x1:.1f} (外侧正点)")
+
+                    if oy < roi_box.y0:  # 外侧区域在上侧，扩展上边界
+                        extend_to = T - (roi_box.y0 - T) * expansion_factor
+                        new_roi.y0 = max(0, min(new_roi.y0, extend_to))
+                        adjustments_made.append(f"上边界扩展至 {new_roi.y0:.1f} (外侧正点)")
+
+                    elif oy > roi_box.y1:  # 外侧区域在下侧，扩展下边界
+                        extend_to = Btm + (Btm - roi_box.y1) * expansion_factor
+                        new_roi.y1 = min(H, max(new_roi.y1, extend_to))
+                        adjustments_made.append(f"下边界扩展至 {new_roi.y1:.1f} (外侧正点)")
+
+                else:  # action == 'neg'
+                    # 外侧负点：这种情况较少，表示外侧区域有干扰，可能需要轻微收缩
+                    # 这里我们保持保守，不做大幅调整
+                    continue
+
+    # 打印调整信息
+    if adjustments_made:
+        for adj in adjustments_made:
+            print(f"[INFO] ROI调整: {adj}")
+
+    return new_roi
+
+
+def analyze_mask_expansion(prev_mask: np.ndarray, current_mask: np.ndarray,
+                          original_roi: ROIBox) -> dict:
+    """分析掩码在各个方向的扩展情况"""
+    # 找到新掩码和旧掩码的边界
+    prev_coords = np.where(prev_mask > 0)
+    current_coords = np.where(current_mask > 0)
+
+    expansion_info = {
+        'left': 0, 'right': 0, 'top': 0, 'bottom': 0,
+        'has_expansion': False
+    }
+
+    if len(prev_coords[0]) == 0 or len(current_coords[0]) == 0:
+        return expansion_info
+
+    # 计算边界
+    prev_bounds = {
+        'top': np.min(prev_coords[0]),
+        'bottom': np.max(prev_coords[0]),
+        'left': np.min(prev_coords[1]),
+        'right': np.max(prev_coords[1])
+    }
+
+    current_bounds = {
+        'top': np.min(current_coords[0]),
+        'bottom': np.max(current_coords[0]),
+        'left': np.min(current_coords[1]),
+        'right': np.max(current_coords[1])
+    }
+
+    # 检测各方向扩展
+    expansion_info['top'] = prev_bounds['top'] - current_bounds['top']  # 正值表示向上扩展
+    expansion_info['bottom'] = current_bounds['bottom'] - prev_bounds['bottom']  # 正值表示向下扩展
+    expansion_info['left'] = prev_bounds['left'] - current_bounds['left']  # 正值表示向左扩展
+    expansion_info['right'] = current_bounds['right'] - prev_bounds['right']  # 正值表示向右扩展
+
+    # 判断是否有显著扩展（超过5像素）
+    threshold = 5
+    expansion_info['has_expansion'] = any(abs(v) > threshold for v in
+                                        [expansion_info['top'], expansion_info['bottom'],
+                                         expansion_info['left'], expansion_info['right']])
+
+    return expansion_info
+
+
+def update_roi_based_on_expansion(original_roi: ROIBox, expansion_info: dict,
+                                 ratio: float, image_shape: Tuple[int, int]) -> ROIBox:
+    """根据掩码扩展情况动态调整ROI"""
+    if not expansion_info['has_expansion']:
+        return original_roi
+
+    H, W = image_shape
+
+    # 计算调整幅度，ratio控制激进程度
+    # ratio越大，调整越激进
+    adjustment_factor = ratio * 0.5  # 将ratio转换为合适的调整系数
+
+    # 基于扩展方向调整BBox边界
+    new_x0 = original_roi.x0
+    new_y0 = original_roi.y0
+    new_x1 = original_roi.x1
+    new_y1 = original_roi.y1
+
+    # 向左扩展
+    if expansion_info['left'] > 0:
+        adjust_amount = expansion_info['left'] * adjustment_factor
+        new_x0 = max(0, original_roi.x0 - adjust_amount)
+        print(f"[INFO] ROI向左扩展: {adjust_amount:.1f}像素")
+
+    # 向右扩展
+    if expansion_info['right'] > 0:
+        adjust_amount = expansion_info['right'] * adjustment_factor
+        new_x1 = min(W, original_roi.x1 + adjust_amount)
+        print(f"[INFO] ROI向右扩展: {adjust_amount:.1f}像素")
+
+    # 向上扩展
+    if expansion_info['top'] > 0:
+        adjust_amount = expansion_info['top'] * adjustment_factor
+        new_y0 = max(0, original_roi.y0 - adjust_amount)
+        print(f"[INFO] ROI向上扩展: {adjust_amount:.1f}像素")
+
+    # 向下扩展
+    if expansion_info['bottom'] > 0:
+        adjust_amount = expansion_info['bottom'] * adjustment_factor
+        new_y1 = min(H, original_roi.y1 + adjust_amount)
+        print(f"[INFO] ROI向下扩展: {adjust_amount:.1f}像素")
+
+    # 对于收缩情况，适度内缩BBox（更保守）
+    shrink_factor = adjustment_factor * 0.3  # 收缩时更保守
+
+    if expansion_info['left'] < -10:  # 向右收缩超过10像素
+        adjust_amount = abs(expansion_info['left']) * shrink_factor
+        new_x0 = min(original_roi.x1 - 50, original_roi.x0 + adjust_amount)  # 确保不会过度收缩
+        print(f"[INFO] ROI向右内缩: {adjust_amount:.1f}像素")
+
+    if expansion_info['right'] < -10:  # 向左收缩
+        adjust_amount = abs(expansion_info['right']) * shrink_factor
+        new_x1 = max(original_roi.x0 + 50, original_roi.x1 - adjust_amount)
+        print(f"[INFO] ROI向左内缩: {adjust_amount:.1f}像素")
+
+    if expansion_info['top'] < -10:  # 向下收缩
+        adjust_amount = abs(expansion_info['top']) * shrink_factor
+        new_y0 = min(original_roi.y1 - 50, original_roi.y0 + adjust_amount)
+        print(f"[INFO] ROI向下内缩: {adjust_amount:.1f}像素")
+
+    if expansion_info['bottom'] < -10:  # 向上收缩
+        adjust_amount = abs(expansion_info['bottom']) * shrink_factor
+        new_y1 = max(original_roi.y0 + 50, original_roi.y1 - adjust_amount)
+        print(f"[INFO] ROI向上内缩: {adjust_amount:.1f}像素")
+
+    return ROIBox(new_x0, new_y0, new_x1, new_y1)
+
+
+def refine_mask_with_local_expansion(predictor: SamPredictor, image: np.ndarray, roi_box: ROIBox,
+                                   anchor_edits: List[dict], anchor_bounds_list: List[Tuple],
+                                   prev_mask: np.ndarray) -> np.ndarray:
+    """使用局部扩展进行精确的SAM分割优化"""
+    predictor.set_image(image)
+
+    # 从之前的掩码开始
+    result_mask = prev_mask.copy()
+
+    # 为每个锚点的编辑创建局部扩展并分别处理
+    for (anchor_point, square_bounds, edits) in anchor_edits:
+        if not edits:
+            continue
+
+        # 处理该锚点的每个编辑指令
+        for edit in edits:
+            region_id = int(edit.get('region_id', 0))
+            action = str(edit.get('action', ''))
+
+            if region_id not in [1, 2] or action not in ['pos', 'neg']:
+                continue
+
+            # 获取区域中心点
+            region_center = get_tangent_region_center(square_bounds, region_id)
+
+            # 创建该区域的局部扩展框
+            local_box = create_local_expansion_box(anchor_point, region_center, image.shape[:2])
+
+            print(f"[INFO] 锚点局部扩展: 区域{region_id} ({region_center[0]:.1f}, {region_center[1]:.1f}) -> "
+                  f"扩展框({local_box[0]}, {local_box[1]}, {local_box[2]}, {local_box[3]})")
+
+            # 在局部区域进行SAM分割
+            point_coords = np.array([region_center])
+            point_labels = np.array([1 if action == 'pos' else 0])
+
+            masks, scores, logits = predictor.predict(
+                point_coords=point_coords,
+                point_labels=point_labels,
+                box=np.array(local_box),
+                multimask_output=True,
+            )
+
+            # 选择最佳掩码
+            best_idx = np.argmax(scores)
+            best_mask = masks[best_idx]
+
+            # 将局部结果融合到主掩码
+            x0, y0, x1, y1 = local_box
+            # SAM返回的是全图掩码，需要提取局部区域
+            local_region = (best_mask[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
+
+            if action == 'pos':
+                # 正点：添加到掩码
+                result_mask[y0:y1, x0:x1] = np.maximum(result_mask[y0:y1, x0:x1], local_region)
+            else:
+                # 负点：从掩码中移除
+                result_mask[y0:y1, x0:x1] = np.where(local_region > 0, 0, result_mask[y0:y1, x0:x1])
+
+    return result_mask
+
+
+def refine_mask_with_points_expanded(predictor: SamPredictor, image: np.ndarray, roi_box: ROIBox,
+                                   pos_points: List[Tuple[float, float]],
+                                   neg_points: List[Tuple[float, float]],
+                                   prev_mask: np.ndarray,
+                                   expansion_ratio: float = 0.2) -> np.ndarray:
+    """步骤4: 使用正负点进行SAM分割优化（扩展版本，允许在ROI外分割）"""
+    predictor.set_image(image)
+
+    # 组合所有点和标签
+    all_points = pos_points + neg_points
+    all_labels = [1] * len(pos_points) + [0] * len(neg_points)
+
+    if not all_points:
+        return prev_mask
+
+    # 创建扩展的ROI区域用于SAM分割
+    expanded_roi = create_expanded_roi(roi_box, expansion_ratio, image.shape[:2])
+
+    print(f"[INFO] 扩展ROI: 原始({roi_box.x0:.1f}, {roi_box.y0:.1f}, {roi_box.x1:.1f}, {roi_box.y1:.1f}) -> "
+          f"扩展({expanded_roi.x0:.1f}, {expanded_roi.y0:.1f}, {expanded_roi.x1:.1f}, {expanded_roi.y1:.1f})")
+
+    masks, scores, logits = predictor.predict(
+        point_coords=np.array(all_points),
+        point_labels=np.array(all_labels),
+        box=np.array([expanded_roi.x0, expanded_roi.y0, expanded_roi.x1, expanded_roi.y1]),
+        multimask_output=True,
+    )
+
+    # 选择最佳掩码
+    best_idx = np.argmax(scores)
+    best_mask = masks[best_idx]
+
+    # 创建最终掩码，优先保留原始ROI内的结果，但允许适度扩展
+    H, W = image.shape[:2]
+    final_mask = np.zeros((H, W), dtype=np.uint8)
+
+    # 将SAM结果应用到扩展区域
+    ex0, ey0, ex1, ey1 = int(expanded_roi.x0), int(expanded_roi.y0), int(expanded_roi.x1), int(expanded_roi.y1)
+    expanded_mask_region = (best_mask[ey0:ey1, ex0:ex1] > 0).astype(np.uint8) * 255
+    final_mask[ey0:ey1, ex0:ex1] = expanded_mask_region
+
+    # 获取原始ROI区域的结果
+    ox0, oy0, ox1, oy1 = int(roi_box.x0), int(roi_box.y0), int(roi_box.x1), int(roi_box.y1)
+    roi_mask_region = final_mask[oy0:oy1, ox0:ox1]
+
+    # 如果扩展区域的像素数相比原始区域增加太多，进行适度约束
+    original_pixels = np.sum(prev_mask > 0)
+    new_pixels = np.sum(final_mask > 0)
+    expansion_factor = new_pixels / max(1, original_pixels)
+
+    # 如果扩展过度（超过3倍），回退到更保守的策略
+    if expansion_factor > 3.0:
+        print(f"[WARN] 分割扩展过度 ({expansion_factor:.2f}x)，使用保守策略")
+        # 保守策略：主要使用原始ROI内的结果，只在边缘稍微扩展
+        conservative_mask = np.zeros((H, W), dtype=np.uint8)
+        conservative_mask[oy0:oy1, ox0:ox1] = roi_mask_region
+
+        # 在原始ROI边界附近允许少量扩展
+        margin = 20  # 像素
+        extended_x0 = max(0, ox0 - margin)
+        extended_y0 = max(0, oy0 - margin)
+        extended_x1 = min(W, ox1 + margin)
+        extended_y1 = min(H, oy1 + margin)
+
+        # 只在边缘区域应用扩展结果
+        edge_mask = final_mask[extended_y0:extended_y1, extended_x0:extended_x1]
+        conservative_mask[extended_y0:extended_y1, extended_x0:extended_x1] = np.maximum(
+            conservative_mask[extended_y0:extended_y1, extended_x0:extended_x1],
+            edge_mask
+        )
+        final_mask = conservative_mask
+
+    return final_mask
+
+
 def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box: ROIBox,
                           pos_points: List[Tuple[float, float]],
                           neg_points: List[Tuple[float, float]],
@@ -685,9 +1096,8 @@ def main():
 
         print(f"VLM选择的锚点: {selected_anchors}")
 
-        # 收集所有正负点
-        all_pos_points = []
-        all_neg_points = []
+        # 收集锚点编辑信息用于局部扩展
+        anchor_edits = []
         # 使用基于连线交点的锚点
         projected_anchor_points = get_line_based_anchor_points(roi_box, current_mask)
 
@@ -713,34 +1123,41 @@ def main():
 
             print(f"锚点 {anchor_id} 的编辑指令: {edits}")
 
-            # 根据VLM指令生成点
-            for edit in edits:
-                region_id = int(edit.get('region_id', 0))
-                action = str(edit.get('action', ''))
-
-                if region_id in [1, 2] and action in ['pos', 'neg']:
-                    point = get_tangent_region_center(square_bounds, region_id)
-                    if action == 'pos':
-                        all_pos_points.append(point)
-                    else:
-                        all_neg_points.append(point)
+            # 收集锚点信息用于局部扩展
+            anchor_edits.append((anchor_point, square_bounds, edits))
         
         # 卸载VLM模型以释政GPU内存供SAM使用
         print("[INFO] 卸载VLM模型释放内存...")
         vlm.unload_model()
 
-        # 步骤4: 使用收集的点进行sam分割
-        if all_pos_points or all_neg_points:
-            print(f"步骤4: 使用 {len(all_pos_points)} 个正点和 {len(all_neg_points)} 个负点进行分割...")
+        # 步骤4: 使用局部扩展进行精确SAM分割
+        if anchor_edits:
+            total_edits = sum(len(edits) for _, _, edits in anchor_edits)
+            print(f"步骤4: 使用局部扩展方法处理 {total_edits} 个编辑区域...")
             # 清理GPU缓存以释放内存
             import torch
             torch.cuda.empty_cache()
-            current_mask = refine_mask_with_points(predictor, image, roi_box,
-                                                 all_pos_points, all_neg_points, current_mask)
+
+            # 保存分割前的掩码用于对比
+            prev_mask = current_mask.copy()
+
+            current_mask = refine_mask_with_local_expansion(predictor, image, roi_box,
+                                                          anchor_edits, [], current_mask)
             save_image(os.path.join(output_dir, f'step4_round{round_idx + 1}_refined_mask.png'), current_mask)
             print(f"优化后掩码像素数: {np.sum(current_mask > 0)}")
+
+            # 步骤5: 根据VLM动作直接调整ROI
+            new_roi_box = update_roi_based_on_square_actions(roi_box, anchor_edits, float(args.ratio), image.shape[:2])
+
+            if (abs(new_roi_box.x0 - roi_box.x0) > 1 or abs(new_roi_box.y0 - roi_box.y0) > 1 or
+                abs(new_roi_box.x1 - roi_box.x1) > 1 or abs(new_roi_box.y1 - roi_box.y1) > 1):
+                print(f"[INFO] ROI更新: ({roi_box.x0:.1f}, {roi_box.y0:.1f}, {roi_box.x1:.1f}, {roi_box.y1:.1f}) -> "
+                      f"({new_roi_box.x0:.1f}, {new_roi_box.y0:.1f}, {new_roi_box.x1:.1f}, {new_roi_box.y1:.1f})")
+                roi_box = new_roi_box
+            else:
+                print("[INFO] ROI无需调整")
         else:
-            print("未生成任何点，跳过本轮优化")
+            print("未生成任何编辑指令，跳过本轮优化")
 
     # 保存最终结果
     save_image(os.path.join(output_dir, 'final_result.png'), current_mask)
