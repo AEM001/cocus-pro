@@ -162,6 +162,108 @@ def get_anchor_points(roi_box: ROIBox) -> List[Tuple[float, float]]:
     ]
 
 
+def find_line_contour_intersections(line_start: Tuple[float, float], line_end: Tuple[float, float], contour: np.ndarray) -> List[Tuple[float, float]]:
+    """找到线段与轮廓的交点"""
+    if len(contour) == 0:
+        return []
+
+    intersections = []
+    x1, y1 = line_start
+    x2, y2 = line_end
+
+    # 遍历轮廓的每条边，找交点
+    for i in range(len(contour)):
+        # 当前边的两个端点
+        p1 = contour[i]
+        p2 = contour[(i + 1) % len(contour)]
+
+        x3, y3 = float(p1[0]), float(p1[1])
+        x4, y4 = float(p2[0]), float(p2[1])
+
+        # 计算两条线段的交点（如果存在）
+        denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if abs(denom) < 1e-10:  # 平行线
+            continue
+
+        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+        u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+
+        # 检查交点是否在两条线段上
+        if 0 <= t <= 1 and 0 <= u <= 1:
+            ix = x1 + t * (x2 - x1)
+            iy = y1 + t * (y2 - y1)
+            intersections.append((ix, iy))
+
+    return intersections
+
+
+def get_line_based_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, float]]:
+    """基于BBox连线与轮廓交点的锚点生成方法"""
+    # 提取主轮廓
+    main_contour = extract_main_contour(mask)
+
+    # 如果没有轮廓，返回原始锚点
+    if len(main_contour) == 0:
+        print("[WARN] 未找到主轮廓，使用原始锚点")
+        return get_anchor_points(roi_box)
+
+    x0, y0, x1, y1 = roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+
+    # 定义4条关键线段
+    lines = [
+        # 对角线1：左上角到右下角
+        ((x0, y0), (x1, y1)),
+        # 对角线2：右上角到左下角
+        ((x1, y0), (x0, y1)),
+        # 垂直中线：上边中点到下边中点
+        ((cx, y0), (cx, y1)),
+        # 水平中线：左边中点到右边中点
+        ((x0, cy), (x1, cy))
+    ]
+
+    # 收集所有交点
+    all_intersections = []
+    for line_start, line_end in lines:
+        intersections = find_line_contour_intersections(line_start, line_end, main_contour)
+        all_intersections.extend(intersections)
+
+    # 如果交点不足，使用原始锚点作为补充
+    if len(all_intersections) < 8:
+        print(f"[INFO] 找到 {len(all_intersections)} 个交点，使用原始锚点补充")
+        original_anchors = get_anchor_points(roi_box)
+
+        # 使用交点作为前几个锚点，剩余用原始锚点填充
+        result_anchors = all_intersections[:]
+        for i in range(len(all_intersections), 8):
+            if i < len(original_anchors):
+                result_anchors.append(original_anchors[i])
+    else:
+        # 如果交点过多，选择8个最具代表性的点
+        # 按照与BBox角点和边中点的距离进行选择
+        original_anchors = get_anchor_points(roi_box)
+        result_anchors = []
+
+        for orig_anchor in original_anchors:
+            # 找到距离原始锚点最近的交点
+            if all_intersections:
+                distances = [
+                    (ix - orig_anchor[0])**2 + (iy - orig_anchor[1])**2
+                    for ix, iy in all_intersections
+                ]
+                closest_idx = np.argmin(distances)
+                closest_intersection = all_intersections.pop(closest_idx)
+                result_anchors.append(closest_intersection)
+            else:
+                result_anchors.append(orig_anchor)
+
+    # 打印调试信息
+    for i, anchor in enumerate(result_anchors[:8]):
+        print(f"锚点 {i+1}: ({anchor[0]:.1f}, {anchor[1]:.1f})")
+
+    return result_anchors[:8]
+
+
 def get_projected_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, float]]:
     """获取贴边投影后的8个锚点坐标（投影到轮廓上）"""
     # 首先获取原始锚点
@@ -207,8 +309,8 @@ def draw_anchors_on_image(image: np.ndarray, roi_box: ROIBox, mask: np.ndarray) 
     _, box_th = _auto_font_and_thickness(base_len)
     cv2.rectangle(vis_img, (int(roi_box.x0), int(roi_box.y0)), (int(roi_box.x1), int(roi_box.y1)), (255, 0, 0), box_th)
 
-    # 使用贴边投影后的锚点
-    projected_anchor_points = get_projected_anchor_points(roi_box, mask)
+    # 使用基于连线交点的锚点
+    projected_anchor_points = get_line_based_anchor_points(roi_box, mask)
     radius = int(max(5, min(16, base_len / 25.0)))
     font_scale, text_th = _auto_font_and_thickness(base_len)
     
@@ -223,6 +325,154 @@ def draw_anchors_on_image(image: np.ndarray, roi_box: ROIBox, mask: np.ndarray) 
         cv2.putText(vis_img, str(i), (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), text_th)
 
     return vis_img
+
+
+def get_contour_tangent_at_point(point: Tuple[float, float], contour: np.ndarray, window_size: int = 5) -> Tuple[float, float]:
+    """计算轮廓在指定点处的切线向量"""
+    if len(contour) == 0:
+        return (1.0, 0.0)  # 默认水平方向
+
+    px, py = float(point[0]), float(point[1])
+
+    # 找到距离锚点最近的轮廓点
+    distances = np.sqrt((contour[:, 0] - px) ** 2 + (contour[:, 1] - py) ** 2)
+    closest_idx = np.argmin(distances)
+
+    # 在最近点周围取一个窗口来计算切线
+    n_points = len(contour)
+    start_idx = (closest_idx - window_size) % n_points
+    end_idx = (closest_idx + window_size) % n_points
+
+    # 取窗口内的点
+    if start_idx <= end_idx:
+        window_points = contour[start_idx:end_idx+1]
+    else:
+        window_points = np.concatenate([contour[start_idx:], contour[:end_idx+1]])
+
+    if len(window_points) < 2:
+        return (1.0, 0.0)
+
+    # 计算平均切线方向
+    tangent_vectors = []
+    for i in range(len(window_points) - 1):
+        dx = window_points[i+1][0] - window_points[i][0]
+        dy = window_points[i+1][1] - window_points[i][1]
+        if dx != 0 or dy != 0:
+            tangent_vectors.append((dx, dy))
+
+    if not tangent_vectors:
+        return (1.0, 0.0)
+
+    # 计算平均切线方向
+    avg_dx = sum(v[0] for v in tangent_vectors) / len(tangent_vectors)
+    avg_dy = sum(v[1] for v in tangent_vectors) / len(tangent_vectors)
+
+    # 归一化
+    length = np.sqrt(avg_dx * avg_dx + avg_dy * avg_dy)
+    if length < 1e-6:
+        return (1.0, 0.0)
+
+    return (avg_dx / length, avg_dy / length)
+
+
+def create_tangent_square_visualization(image: np.ndarray, anchor_point: Tuple[float, float],
+                                      roi_box: ROIBox, mask: np.ndarray, anchor_id: int,
+                                      ratio: float = 0.8) -> Tuple[np.ndarray, Tuple[int, int, int, int, Tuple[float, float], Tuple[float, float]]]:
+    """基于切线的内外正方形可视化"""
+    # 计算正方形半边长
+    roi_width = roi_box.x1 - roi_box.x0
+    roi_height = roi_box.y1 - roi_box.y0
+    base_size = max(120.0, float(ratio) * float(min(roi_width, roi_height)))
+    half_size = base_size / 2.0
+
+    # 锚点坐标
+    cx, cy = float(anchor_point[0]), float(anchor_point[1])
+
+    # 提取主轮廓并计算切线方向
+    main_contour = extract_main_contour(mask)
+    if len(main_contour) > 0:
+        tangent_dx, tangent_dy = get_contour_tangent_at_point(anchor_point, main_contour)
+    else:
+        tangent_dx, tangent_dy = 1.0, 0.0  # 默认水平方向
+
+    # 计算法线方向（垂直于切线，指向内侧）
+    normal_dx, normal_dy = -tangent_dy, tangent_dx
+
+    # 计算正方形的四个角点
+    # 以切线和法线方向为基础构建正方形
+    corners = [
+        (cx - half_size * tangent_dx - half_size * normal_dx, cy - half_size * tangent_dy - half_size * normal_dy),  # 左下
+        (cx + half_size * tangent_dx - half_size * normal_dx, cy + half_size * tangent_dy - half_size * normal_dy),  # 右下
+        (cx + half_size * tangent_dx + half_size * normal_dx, cy + half_size * tangent_dy + half_size * normal_dy),  # 右上
+        (cx - half_size * tangent_dx + half_size * normal_dx, cy - half_size * tangent_dy + half_size * normal_dy),  # 左上
+    ]
+
+    # 计算包围盒
+    min_x = min(corner[0] for corner in corners)
+    max_x = max(corner[0] for corner in corners)
+    min_y = min(corner[1] for corner in corners)
+    max_y = max(corner[1] for corner in corners)
+
+    L = max(0, int(round(min_x)))
+    T = max(0, int(round(min_y)))
+    R = min(int(image.shape[1]), int(round(max_x)))
+    Btm = min(int(image.shape[0]), int(round(max_y)))
+
+    vis = image.copy()
+
+    # 绘制轮廓
+    if len(main_contour) > 0:
+        base_len = float(min(roi_width, roi_height))
+        _, contour_th = _auto_font_and_thickness(base_len)
+        contour_th = max(2, contour_th)
+        cv2.drawContours(vis, [main_contour.reshape(-1, 1, 2).astype(np.int32)], -1, (0, 255, 255), contour_th // 2)
+
+    # 线宽与字体
+    font_scale, thick = _auto_font_and_thickness(base_size)
+    line_th = max(2, thick)
+
+    # 绘制正方形边框
+    square_points = np.array(corners, dtype=np.int32)
+    cv2.polylines(vis, [square_points], True, (0, 255, 255), line_th)
+
+    # 绘制切线（水平分割线）
+    cut_line_start = (cx - half_size * tangent_dx, cy - half_size * tangent_dy)
+    cut_line_end = (cx + half_size * tangent_dx, cy + half_size * tangent_dy)
+    cv2.line(vis, (int(cut_line_start[0]), int(cut_line_start[1])),
+             (int(cut_line_end[0]), int(cut_line_end[1])), (0, 255, 255), line_th)
+
+    # 计算内外区域的中心点
+    inner_center = (cx + half_size * normal_dx * 0.5, cy + half_size * normal_dy * 0.5)  # 内侧区域中心
+    outer_center = (cx - half_size * normal_dx * 0.5, cy - half_size * normal_dy * 0.5)  # 外侧区域中心
+
+    # 绘制区域标签
+    # "内" 标签 (1)
+    cv2.putText(vis, "1", (int(inner_center[0]), int(inner_center[1])),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thick + 2)
+    cv2.putText(vis, "1", (int(inner_center[0]), int(inner_center[1])),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 0), thick)
+
+    # "外" 标签 (2)
+    cv2.putText(vis, "2", (int(outer_center[0]), int(outer_center[1])),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thick + 2)
+    cv2.putText(vis, "2", (int(outer_center[0]), int(outer_center[1])),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 0), thick)
+
+    return vis, (L, T, R, Btm, inner_center, outer_center)
+
+
+def get_tangent_region_center(square_bounds: Tuple[int, int, int, int, Tuple[float, float], Tuple[float, float]],
+                            region_id: int) -> Tuple[float, float]:
+    """获取指定切线区域的中心点坐标"""
+    _, _, _, _, inner_center, outer_center = square_bounds
+
+    if region_id == 1:  # 内侧区域
+        return inner_center
+    elif region_id == 2:  # 外侧区域
+        return outer_center
+    else:
+        # 默认返回内侧中心
+        return inner_center
 
 
 def create_quadrant_visualization(image: np.ndarray, anchor_point: Tuple[float, float],
@@ -438,8 +688,8 @@ def main():
         # 收集所有正负点
         all_pos_points = []
         all_neg_points = []
-        # 使用贴边投影后的锚点
-        projected_anchor_points = get_projected_anchor_points(roi_box, current_mask)
+        # 使用基于连线交点的锚点
+        projected_anchor_points = get_line_based_anchor_points(roi_box, current_mask)
 
         for anchor_info in selected_anchors:
             anchor_id = int(anchor_info.get('id', 0))
@@ -449,12 +699,12 @@ def main():
             # 使用贴边投影后的锚点位置
             anchor_point = projected_anchor_points[anchor_id - 1]
 
-            # 步骤3: 创建扇形可视化
-            print(f"步骤3: 为锚点 {anchor_id} 创建扇形...")
-            quad_vis, circle_bounds = create_quadrant_visualization(
+            # 步骤3: 创建切线内外区域可视化
+            print(f"步骤3: 为锚点 {anchor_id} 创建切线内外区域...")
+            quad_vis, square_bounds = create_tangent_square_visualization(
                 image, anchor_point, roi_box, current_mask, anchor_id, ratio=float(args.ratio)
             )
-            save_image(os.path.join(output_dir, f'step3_round{round_idx + 1}_anchor{anchor_id}_sectors.png'), quad_vis)
+            save_image(os.path.join(output_dir, f'step3_round{round_idx + 1}_anchor{anchor_id}_tangent_square.png'), quad_vis)
 
             # 传给VLM前缩放
             quad_vis_vlm = _resize_for_vlm(quad_vis, int(args.vlm_max_side))
@@ -468,8 +718,8 @@ def main():
                 region_id = int(edit.get('region_id', 0))
                 action = str(edit.get('action', ''))
 
-                if region_id in [1, 2, 3, 4] and action in ['pos', 'neg']:
-                    point = get_sector_center(circle_bounds, region_id, anchor_point)
+                if region_id in [1, 2] and action in ['pos', 'neg']:
+                    point = get_tangent_region_center(square_bounds, region_id)
                     if action == 'pos':
                         all_pos_points.append(point)
                     else:

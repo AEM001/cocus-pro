@@ -79,11 +79,11 @@ def build_quadrant_prompt(
     *,
     semantic: Optional[SemanticCtx] = None,
     anchor_hint: Optional[str] = None,
-    max_pos: int = 2,
-    max_neg: int = 2
+    max_pos: int = 1,
+    max_neg: int = 1
 ) -> Dict[str, str]:
     """
-    不改变原有键，但更清晰地约束如何判定 pos/neg。
+    基于切线内外区域的提示词构建。
     """
     sem = semantic or {}
     sys_msg = (
@@ -98,34 +98,43 @@ Salient cues: {_fmt_list(sem.get('salient_cues'))}
 Distractors: {_fmt_list(sem.get('distractors'))}
 NOT-target parts: {_fmt_list(sem.get('not_target_parts'))}
 
-Focus anchor id: {anchor_id}. A square centered at this anchor is split into 4 regions {{1..4}}.
-Normal points outward from the current mask. Tangent aligns with boundary flow.
+Focus anchor id: {anchor_id}. A square region centered at this anchor point is divided by the contour's tangent line into two areas:
+- Region 1 (Inner): The side toward the object interior
+- Region 2 (Outer): The side toward the background/exterior
 
 Internal decision rubric (DO NOT OUTPUT):
-- POS if the region continues target's texture/shape along the inward side or closes a plausible gap.
-- NEG if the region matches background distractors or disrupts target silhouette (outward leak).
-- Prefer one POS + one NEG if both are clear; otherwise choose the single most informative action.
-- Avoid POS where texture sharply mismatches target cues; avoid NEG where cues clearly match the target.
-- Max {max_pos} POS and {max_neg} NEG actions.
+- POS if the region contains target texture/pattern that should be included in the mask
+- NEG if the region contains background patterns, distractors, or should be excluded from the mask
+- You MUST select exactly one region (either inner or outer, not both)
+- Choose the action (pos/neg) that will most improve the segmentation quality
+- Inner regions typically get POS when object extends inward; NEG when mask over-includes
+- Outer regions typically get NEG when background leaks in; POS when object extends outward
 
 Return JSON STRICTLY:
 {{
   "anchor_id": {anchor_id},
   "edits": [
-    {{ "region_id": 1-4, "action": "pos" | "neg", "why": "short justification (no numbers)" }}
+    {{ "region_id": 1 | 2, "action": "pos" | "neg", "why": "short justification" }}
   ]
 }}
 Constraints:
-- 1 <= len(edits) <= {max(1, max_pos + max_neg)}
-- Use only ids 1..4
-- Keep 'why' short; no lists or numbering
+- len(edits) == 1 (exactly one region selection)
+- region_id must be 1 (inner) or 2 (outer)
+- action must be "pos" or "neg"
+- Keep 'why' brief and descriptive
 
 Few-shot examples (DO NOT COPY):
 {{
   "anchor_id": 3,
   "edits": [
-    {{ "region_id": 2, "action": "neg", "why": "sand ripple leak" }},
-    {{ "region_id": 4, "action": "pos", "why": "mottled texture continues" }}
+    {{ "region_id": 2, "action": "neg", "why": "sand ripple background leak" }}
+  ]
+}}
+
+{{
+  "anchor_id": 5,
+  "edits": [
+    {{ "region_id": 1, "action": "pos", "why": "fin texture continues inward" }}
   ]
 }}
 """
