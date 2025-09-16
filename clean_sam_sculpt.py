@@ -132,25 +132,6 @@ def extract_main_contour(mask: np.ndarray) -> np.ndarray:
     return main_contour.squeeze(axis=1) if len(main_contour.shape) == 3 else main_contour
 
 
-def project_point_to_contour(point: Tuple[float, float], contour: np.ndarray) -> Tuple[float, float]:
-    """将点投影到最近的轮廓点"""
-    if len(contour) == 0:
-        return point
-    
-    px, py = float(point[0]), float(point[1])
-    
-    # 计算到所有轮廓点的距离
-    distances = np.sqrt((contour[:, 0] - px) ** 2 + (contour[:, 1] - py) ** 2)
-    
-    # 找到最近的点
-    min_idx = np.argmin(distances)
-    closest_point = contour[min_idx]
-    
-    return (float(closest_point[0]), float(closest_point[1]))
-
-
-
-
 def find_line_contour_intersections(line_start: Tuple[float, float], line_end: Tuple[float, float], contour: np.ndarray) -> List[Tuple[float, float]]:
     """找到线段与轮廓的交点"""
     if len(contour) == 0:
@@ -187,7 +168,7 @@ def find_line_contour_intersections(line_start: Tuple[float, float], line_end: T
 
 
 def get_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, float]]:
-    """基于BBox连线与轮廓交点的锚点生成方法（原 get_line_based_anchor_points）"""
+    """基于BBox连线与轮廓交点的锚点生成方法"""
     # 提取主轮廓
     main_contour = extract_main_contour(mask)
 
@@ -227,8 +208,6 @@ def get_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, fl
     # 如果交点不足，使用基础锚点作为补充
     if len(all_intersections) < 8:
         print(f"[INFO] 找到 {len(all_intersections)} 个交点，使用基础锚点补充")
-        x0, y0, x1, y1 = roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         fallback_anchors = [
             (x0, y0), (cx, y0), (x1, y0),  # 1,2,3: 左上，上中，右上
             (x1, cy),                       # 4: 右中
@@ -244,8 +223,6 @@ def get_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, fl
     else:
         # 如果交点过多，选择8个最具代表性的点
         # 按照与BBox角点和边中点的距离进行选择
-        x0, y0, x1, y1 = roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         reference_anchors = [
             (x0, y0), (cx, y0), (x1, y0),  # 1,2,3: 左上，上中，右上
             (x1, cy),                       # 4: 右中
@@ -272,8 +249,6 @@ def get_anchor_points(roi_box: ROIBox, mask: np.ndarray) -> List[Tuple[float, fl
         print(f"锚点 {i+1}: ({anchor[0]:.1f}, {anchor[1]:.1f})")
 
     return result_anchors[:8]
-
-
 
 
 def draw_anchors_on_image(image: np.ndarray, roi_box: ROIBox, mask: np.ndarray) -> np.ndarray:
@@ -464,89 +439,6 @@ def get_tangent_region_center(square_bounds: Tuple[int, int, int, int, Tuple[flo
         return inner_center
 
 
-def create_quadrant_visualization(image: np.ndarray, anchor_point: Tuple[float, float],
-                                roi_box: ROIBox, mask: np.ndarray, anchor_id: int,
-                                ratio: float = 0.8) -> Tuple[np.ndarray, Tuple[int, int, int, int, float]]:
-    """步骤3: 圆形扇形分割可视化（替代原方形象限）"""
-    # 计算圆形区域半径（相对ROI，适中比例）
-    roi_width = roi_box.x1 - roi_box.x0
-    roi_height = roi_box.y1 - roi_box.y0
-    base_size = max(120.0, float(ratio) * float(min(roi_width, roi_height)))
-    radius = base_size / 2.0
-
-    # 以锚点为圆心
-    cx, cy = float(anchor_point[0]), float(anchor_point[1])
-    
-    # 计算包围盒用于返回
-    L = max(0, int(round(cx - radius)))
-    T = max(0, int(round(cy - radius)))
-    R = min(int(image.shape[1]), int(round(cx + radius)))
-    Btm = min(int(image.shape[0]), int(round(cy + radius)))
-
-    vis = image.copy()
-    # 提取并绘制轮廓（不再使用绿色覆盖）
-    main_contour = extract_main_contour(mask)
-    if len(main_contour) > 0:
-        base_len = float(min(roi_width, roi_height))
-        _, contour_th = _auto_font_and_thickness(base_len)
-        contour_th = max(2, contour_th)
-        cv2.drawContours(vis, [main_contour.reshape(-1, 1, 2).astype(np.int32)], -1, (0, 255, 255), contour_th // 2)
-
-    # 线宽与字体
-    font_scale, thick = _auto_font_and_thickness(radius * 2)
-    line_th = max(2, thick)
-
-    # 绘制圆形边框
-    cv2.circle(vis, (int(cx), int(cy)), int(radius), (0, 255, 255), line_th)
-    
-    # 绘制十字分割线（将圆分成四个扇形）
-    # 水平线
-    cv2.line(vis, (int(cx - radius), int(cy)), (int(cx + radius), int(cy)), (0, 255, 255), line_th)
-    # 垂直线
-    cv2.line(vis, (int(cx), int(cy - radius)), (int(cx), int(cy + radius)), (0, 255, 255), line_th)
-
-    # 计算四个扇形的中心点位置（在半径的2/3处）
-    sector_r = radius * 2.0 / 3.0  # 标签位置在边缘的 2/3 处
-    centers = [
-        (cx - sector_r * 0.707, cy - sector_r * 0.707),  # 1: 左上 (315度方向)
-        (cx + sector_r * 0.707, cy - sector_r * 0.707),  # 2: 右上 (45度方向)
-        (cx + sector_r * 0.707, cy + sector_r * 0.707),  # 3: 右下 (135度方向)
-        (cx - sector_r * 0.707, cy + sector_r * 0.707),  # 4: 左下 (225度方向)
-    ]
-    
-    # 绘制扇形标签
-    for j, (px, py) in enumerate(centers, 1):
-        # 添加黑色边框使数字更清晰
-        cv2.putText(vis, str(j), (int(px), int(py)), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thick + 2)
-        cv2.putText(vis, str(j), (int(px), int(py)), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 0), thick)
-
-    return vis, (L, T, R, Btm, radius)
-
-
-def get_sector_center(circle_bounds: Tuple[int, int, int, int, float], region_id: int, anchor_point: Tuple[float, float]) -> Tuple[float, float]:
-    """获取指定扇形的中心点坐标"""
-    x_min, y_min, x_max, y_max, radius = circle_bounds
-    cx, cy = float(anchor_point[0]), float(anchor_point[1])
-    
-    # 在每个扇形的中心方向上，距离圆心 radius/2 的位置放置点
-    sector_r = radius / 2.0  # 点位置在半径的 1/2 处
-    
-    if region_id == 1:  # 左上扇形 (315度方向)
-        angle = -45.0 * np.pi / 180.0  # -45度转换为弧度
-        return (cx + sector_r * np.cos(angle), cy + sector_r * np.sin(angle))
-    elif region_id == 2:  # 右上扇形 (45度方向)
-        angle = 45.0 * np.pi / 180.0
-        return (cx + sector_r * np.cos(angle), cy + sector_r * np.sin(angle))
-    elif region_id == 3:  # 右下扇形 (135度方向)
-        angle = 135.0 * np.pi / 180.0
-        return (cx + sector_r * np.cos(angle), cy + sector_r * np.sin(angle))
-    elif region_id == 4:  # 左下扇形 (225度方向)
-        angle = 225.0 * np.pi / 180.0
-        return (cx + sector_r * np.cos(angle), cy + sector_r * np.sin(angle))
-    else:
-        return (cx, cy)
-
-
 def calculate_smart_roi_expansion(roi_box: ROIBox, pos_points: List[Tuple[float, float]], 
                                    square_size: float, image_shape: Tuple[int, int]) -> ROIBox:
     """根据正点提示智能调整ROI框，向相应边的外侧扩展小正方形的边长"""
@@ -656,12 +548,11 @@ def _resize_for_vlm(img: np.ndarray, max_side: int) -> np.ndarray:
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description='SAM+Qwen refinement (camouflage-friendly)')
+    ap = argparse.ArgumentParser(description='SAM+Qwen refinement with single-anchor optimization')
     ap.add_argument('--name', default='f', help='sample name (e.g., f, dog, q)')
     ap.add_argument('--qwen_dir', default='/home/albert/code/CV/models/Qwen2.5-VL-3B-Instruct', help='Qwen2.5-VL model dir (3B recommended)')
     ap.add_argument('--rounds', type=int, default=4, help='refinement rounds')
-    # 移除anchors_per_round参数，因为现在VLM每次只选择一个最重要的锚点
-    ap.add_argument('--ratio', type=float, default=0.8, help='square ratio to ROI short side for quadrant crop')
+    ap.add_argument('--ratio', type=float, default=0.8, help='square ratio to ROI short side for tangent square crop')
     ap.add_argument('--vlm_max_side', type=int, default=720, help='resize long side before sending to VLM (<=0 to disable)')
     args = ap.parse_args()
 
@@ -683,9 +574,9 @@ def main():
             pass
 
     # 输出目录
-    output_dir = os.path.join(base_dir, 'outputs', 'refactor_sculpt', sample_name)
+    output_dir = os.path.join(base_dir, 'outputs', 'clean_sculpt', sample_name)
 
-    print(f"=== 重构后的SAM分割流程 (样本: {sample_name}, 实例: {instance_name}) ===")
+    print(f"=== 清理版SAM分割流程 (样本: {sample_name}, 实例: {instance_name}) ===")
     print("[优化策略] 使用单点优化策略: VLM每次只选择一个最重要的锚点进行精细优化")
 
     # 加载数据
@@ -722,7 +613,8 @@ def main():
         anchor_vis_vlm = _resize_for_vlm(anchor_vis, int(args.vlm_max_side))
         anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name)
         selected_anchors = anchor_response.get('anchors_to_refine', [])
-        # VLM现在应该只返回一个锁点，但保持兼容性，只取第一个
+        
+        # VLM现在应该只返回一个锚点，但保持兼容性，只取第一个
         if len(selected_anchors) > 1:
             print(f"[INFO] VLM返回了{len(selected_anchors)}个锚点，但只使用第一个最重要的")
             selected_anchors = selected_anchors[:1]
@@ -740,7 +632,7 @@ def main():
         # 收集所有正负点
         all_pos_points = []
         all_neg_points = []
-        update_windows: List[Tuple[int, int, int, int]] = []  # (L, T, R, B)
+        
         # 使用基于连线交点的锚点
         projected_anchor_points = get_anchor_points(roi_box, current_mask)
 
@@ -754,17 +646,14 @@ def main():
 
             # 步骤3: 创建切线内外区域可视化
             print(f"步骤3: 为锚点 {anchor_id} 创建切线内外区域...")
-            quad_vis, square_bounds = create_tangent_square_visualization(
+            tangent_vis, square_bounds = create_tangent_square_visualization(
                 image, anchor_point, roi_box, current_mask, anchor_id, ratio=float(args.ratio)
             )
-            save_image(os.path.join(output_dir, f'round{round_idx + 1}_step3_anchor{anchor_id}_tangent_square.png'), quad_vis)
-            # 记录本锚点的局部更新窗口（L,T,R,B）
-            L, T, R, Btm, _, _ = square_bounds
-            update_windows.append((int(L), int(T), int(R), int(Btm)))
+            save_image(os.path.join(output_dir, f'round{round_idx + 1}_step3_anchor{anchor_id}_tangent_square.png'), tangent_vis)
 
             # 传给VLM前缩放
-            quad_vis_vlm = _resize_for_vlm(quad_vis, int(args.vlm_max_side))
-            quad_response = vlm.quadrant_edits(quad_vis_vlm, instance_name, anchor_id)
+            tangent_vis_vlm = _resize_for_vlm(tangent_vis, int(args.vlm_max_side))
+            quad_response = vlm.quadrant_edits(tangent_vis_vlm, instance_name, anchor_id)
             edits = quad_response.get('edits', [])
 
             print(f"锚点 {anchor_id} 的编辑指令: {edits}")
@@ -781,7 +670,7 @@ def main():
                     else:
                         all_neg_points.append(point)
         
-        # 卸载VLM模型以释政GPU内存供SAM使用
+        # 卸载VLM模型以释放GPU内存供SAM使用
         print("[INFO] 卸载VLM模型释放内存...")
         vlm.unload_model()
 
@@ -794,6 +683,7 @@ def main():
         if all_pos_points or all_neg_points:
             print(f"步骤4: 使用 {len(all_pos_points)} 个正点和 {len(all_neg_points)} 个负点进行分割...")
             print(f"[参数] 小正方形尺寸: {square_size:.1f} px （用于智能扩展BBox）")
+            
             # 构建严格的局部更新门控掩码（仅允许被选中锚点周围的小范围更新）
             H, W = image.shape[:2]
             allowed_update_mask = np.zeros((H, W), dtype=np.uint8)
@@ -843,7 +733,7 @@ def main():
     final_vis[current_mask > 0] = final_vis[current_mask > 0] * 0.6 + np.array([0, 255, 0]) * 0.4
     save_image(os.path.join(output_dir, 'final_visualization.png'), final_vis)
 
-    print("\n=== 重构完成! ===")
+    print("\n=== 清理版重构完成! ===")
     print(f"最终掩码像素数: {np.sum(current_mask > 0)}")
     print(f"输出目录: {output_dir}")
 
