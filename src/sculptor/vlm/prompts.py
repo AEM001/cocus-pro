@@ -1,7 +1,7 @@
 from __future__ import annotations
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Union
 
-SemanticCtx = Dict[str, List[str] | str]
+SemanticCtx = Dict[str, Union[List[str], str]]
 
 def _fmt_list(xs: Optional[List[str]]) -> str:
     return ", ".join(xs) if xs else "none"

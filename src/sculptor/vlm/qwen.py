@@ -165,7 +165,7 @@ class QwenVLM(VLMBase):
         return {"anchors_to_refine": norm, "raw_text": text}
 
     def quadrant_edits(self, quadrant_crop_rgb: np.ndarray, instance: str, anchor_id: int, global_reason: Optional[str] = None, anchor_reason: Optional[str] = None) -> Dict[str, Any]:
-        prompts = build_quadrant_prompt(instance, anchor_id, global_reason, anchor_reason)
+        prompts = build_quadrant_prompt(instance, anchor_id, global_reason, anchor_hint=anchor_reason)
         text = self._inference([quadrant_crop_rgb], prompts["system"], prompts["user"])  # type: ignore
         
         # DEBUG: Print raw VLM response
