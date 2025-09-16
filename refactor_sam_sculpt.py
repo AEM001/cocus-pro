@@ -1113,94 +1113,99 @@ def main():
 
     # 迭代优化
     max_rounds = int(args.rounds)
-    for round_idx in range(max_rounds):
-        print(f"\n=== 第 {round_idx + 1} 轮优化 ===")
+    try:
+        for round_idx in range(max_rounds):
+            print(f"\n=== 第 {round_idx + 1} 轮优化 ===")
 
-        # 步骤2: 绘制锚点，让VLM选择需要精修的锚点
-        print("步骤2: 绘制锚点并请求VLM选择...")
-        anchor_vis = draw_anchors_on_image(image, roi_box, current_mask)
-        save_image(os.path.join(output_dir, f'step2_round{round_idx + 1}_anchors.png'), anchor_vis)
+            # 步骤2: 绘制锚点，让VLM选择需要精修的锚点
+            print("步骤2: 绘制锚点并请求VLM选择...")
+            anchor_vis = draw_anchors_on_image(image, roi_box, current_mask)
+            save_image(os.path.join(output_dir, f'step2_round{round_idx + 1}_anchors.png'), anchor_vis)
 
-        # 传给VLM前缩放，降低显存压力
-        anchor_vis_vlm = _resize_for_vlm(anchor_vis, int(args.vlm_max_side))
-        anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name)
-        selected_anchors = anchor_response.get('anchors_to_refine', [])
-        # 限制每轮最多处理的锚点数量
-        k = max(1, int(args.anchors_per_round))
-        selected_anchors = selected_anchors[:k]
+            # 传给VLM前缩放，降低显存压力
+            anchor_vis_vlm = _resize_for_vlm(anchor_vis, int(args.vlm_max_side))
+            anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name)
+            selected_anchors = anchor_response.get('anchors_to_refine', [])
+            # 限制每轮最多处理的锚点数量
+            k = max(1, int(args.anchors_per_round))
+            selected_anchors = selected_anchors[:k]
 
-        # Fallback: if VLM returns no anchors, use a default anchor to keep pipeline going
-        if not selected_anchors:
-            print("[WARN] VLM未选择任何锚点，使用fallback策略选择锚点1")
-            print(f"[DEBUG] VLM原始响应: '{anchor_response.get('raw_text', 'N/A')}'")
-            fallback_anchor = {"id": 1, "reason": "fallback selection when VLM returned empty"}
-            selected_anchors = [fallback_anchor]
-            print(f"[INFO] 使用fallback锚点: {selected_anchors}")
+            # No fallback: if VLM returns no anchors, raise error to expose the problem
+            if not selected_anchors:
+                print("[ERROR] VLM未选择任何锚点，无法继续")
+                print(f"[DEBUG] VLM原始响应: '{anchor_response.get('raw_text', 'N/A')}'")
+                vlm.unload_model()  # Ensure model is unloaded before crashing
+                raise RuntimeError(f"VLM failed to select anchors. Raw response: {anchor_response.get('raw_text', 'N/A')}")
 
-        print(f"VLM选择的锚点: {selected_anchors}")
+            print(f"VLM选择的锚点: {selected_anchors}")
 
-        # 收集锚点编辑信息用于局部扩展
-        anchor_edits = []
-        # 使用基于连线交点的锚点
-        projected_anchor_points = get_line_based_anchor_points(roi_box, current_mask)
+            # 收集锚点编辑信息用于局部扩展
+            anchor_edits = []
+            # 使用基于连线交点的锚点
+            projected_anchor_points = get_line_based_anchor_points(roi_box, current_mask)
 
-        for anchor_info in selected_anchors:
-            anchor_id = int(anchor_info.get('id', 0))
-            if not (1 <= anchor_id <= 8):
-                continue
+            for anchor_info in selected_anchors:
+                anchor_id = int(anchor_info.get('id', 0))
+                if not (1 <= anchor_id <= 8):
+                    continue
 
-            # 使用贴边投影后的锚点位置
-            anchor_point = projected_anchor_points[anchor_id - 1]
+                # 使用贴边投影后的锚点位置
+                anchor_point = projected_anchor_points[anchor_id - 1]
 
-            # 步骤3: 创建切线内外区域可视化
-            print(f"步骤3: 为锚点 {anchor_id} 创建切线内外区域...")
-            quad_vis, square_bounds = create_tangent_square_visualization(
-                image, anchor_point, roi_box, current_mask, anchor_id, ratio=float(args.ratio)
-            )
-            save_image(os.path.join(output_dir, f'step3_round{round_idx + 1}_anchor{anchor_id}_tangent_square.png'), quad_vis)
+                # 步骤3: 创建切线内外区域可视化
+                print(f"步骤3: 为锚点 {anchor_id} 创建切线内外区域...")
+                quad_vis, square_bounds = create_tangent_square_visualization(
+                    image, anchor_point, roi_box, current_mask, anchor_id, ratio=float(args.ratio)
+                )
+                save_image(os.path.join(output_dir, f'step3_round{round_idx + 1}_anchor{anchor_id}_tangent_square.png'), quad_vis)
 
-            # 传给VLM前缩放
-            quad_vis_vlm = _resize_for_vlm(quad_vis, int(args.vlm_max_side))
-            quad_response = vlm.quadrant_edits(quad_vis_vlm, instance_name, anchor_id)
-            edits = quad_response.get('edits', [])
+                # 传给VLM前缩放
+                quad_vis_vlm = _resize_for_vlm(quad_vis, int(args.vlm_max_side))
+                quad_response = vlm.quadrant_edits(quad_vis_vlm, instance_name, anchor_id)
+                edits = quad_response.get('edits', [])
 
-            print(f"锚点 {anchor_id} 的编辑指令: {edits}")
+                print(f"锚点 {anchor_id} 的编辑指令: {edits}")
 
-            # 收集锚点信息用于局部扩展
-            anchor_edits.append((anchor_point, square_bounds, edits))
-        
-        # 卸载VLM模型以释政GPU内存供SAM使用
-        print("[INFO] 卸载VLM模型释放内存...")
-        vlm.unload_model()
+                # 收集锚点信息用于局部扩展
+                anchor_edits.append((anchor_point, square_bounds, edits))
 
-        # 步骤4: 使用局部扩展进行精确SAM分割
-        if anchor_edits:
-            total_edits = sum(len(edits) for _, _, edits in anchor_edits)
-            print(f"步骤4: 使用局部扩展方法处理 {total_edits} 个编辑区域...")
-            # 清理GPU缓存以释放内存
-            import torch
-            torch.cuda.empty_cache()
+            # 卸载VLM模型以释放GPU内存供SAM使用
+            print("[INFO] 卸载VLM模型释放内存...")
+            vlm.unload_model()
 
-            # 保存分割前的掩码用于对比
-            prev_mask = current_mask.copy()
+            # 步骤4: 使用局部扩展进行精确SAM分割
+            if anchor_edits:
+                total_edits = sum(len(edits) for _, _, edits in anchor_edits)
+                print(f"步骤4: 使用局部扩展方法处理 {total_edits} 个编辑区域...")
+                # 清理GPU缓存以释放内存
+                import torch
+                torch.cuda.empty_cache()
 
-            current_mask = refine_mask_with_local_expansion(predictor, image, roi_box,
-                                                          anchor_edits, [], current_mask)
-            save_image(os.path.join(output_dir, f'step4_round{round_idx + 1}_refined_mask.png'), current_mask)
-            print(f"优化后掩码像素数: {np.sum(current_mask > 0)}")
+                # 保存分割前的掩码用于对比
+                prev_mask = current_mask.copy()
 
-            # 步骤5: 根据VLM动作直接调整ROI
-            new_roi_box = update_roi_based_on_square_actions(roi_box, anchor_edits, float(args.ratio), image.shape[:2])
+                current_mask = refine_mask_with_local_expansion(predictor, image, roi_box,
+                                                              anchor_edits, [], current_mask)
+                save_image(os.path.join(output_dir, f'step4_round{round_idx + 1}_refined_mask.png'), current_mask)
+                print(f"优化后掩码像素数: {np.sum(current_mask > 0)}")
 
-            if (abs(new_roi_box.x0 - roi_box.x0) > 1 or abs(new_roi_box.y0 - roi_box.y0) > 1 or
-                abs(new_roi_box.x1 - roi_box.x1) > 1 or abs(new_roi_box.y1 - roi_box.y1) > 1):
-                print(f"[INFO] ROI更新: ({roi_box.x0:.1f}, {roi_box.y0:.1f}, {roi_box.x1:.1f}, {roi_box.y1:.1f}) -> "
-                      f"({new_roi_box.x0:.1f}, {new_roi_box.y0:.1f}, {new_roi_box.x1:.1f}, {new_roi_box.y1:.1f})")
-                roi_box = new_roi_box
+                # 步骤5: 根据VLM动作直接调整ROI
+                new_roi_box = update_roi_based_on_square_actions(roi_box, anchor_edits, float(args.ratio), image.shape[:2])
+
+                if (abs(new_roi_box.x0 - roi_box.x0) > 1 or abs(new_roi_box.y0 - roi_box.y0) > 1 or
+                    abs(new_roi_box.x1 - roi_box.x1) > 1 or abs(new_roi_box.y1 - roi_box.y1) > 1):
+                    print(f"[INFO] ROI更新: ({roi_box.x0:.1f}, {roi_box.y0:.1f}, {roi_box.x1:.1f}, {roi_box.y1:.1f}) -> "
+                          f"({new_roi_box.x0:.1f}, {new_roi_box.y0:.1f}, {new_roi_box.x1:.1f}, {new_roi_box.y1:.1f})")
+                    roi_box = new_roi_box
+                else:
+                    print("[INFO] ROI无需调整")
             else:
-                print("[INFO] ROI无需调整")
-        else:
-            print("未生成任何编辑指令，跳过本轮优化")
+                print("未生成任何编辑指令，跳过本轮优化")
+
+    finally:
+        # Ensure VLM model is unloaded even if there's an exception
+        print("[INFO] 确保VLM模型被卸载...")
+        vlm.unload_model()
 
     # 保存最终结果
     save_image(os.path.join(output_dir, 'final_result.png'), current_mask)

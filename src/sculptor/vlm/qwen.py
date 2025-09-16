@@ -72,11 +72,11 @@ class QwenVLM(VLMBase):
     def choose_anchors(self, image_with_anchors_rgb: np.ndarray, instance: str, global_reason: Optional[str] = None) -> Dict[str, Any]:
         prompts = build_anchor_prompt(instance, global_reason)
         text = self._inference([image_with_anchors_rgb], prompts["system"], prompts["user"])  # type: ignore
-        
+
         # DEBUG: Print raw VLM response
         print(f"[DEBUG] Raw VLM anchor response: '{text}'")
         print(f"[DEBUG] Response length: {len(text)} chars")
-        
+
         data = try_parse_json(text)
         anchors = data.get("anchors_to_refine", [])
 
@@ -88,90 +88,22 @@ class QwenVLM(VLMBase):
             except Exception:
                 pass
 
-        # Heuristic salvage if empty
+        # No fallback - raise error if parsing fails
         if not norm:
-            import re, json as _json
-            print(f"[DEBUG] No anchors parsed from JSON, attempting heuristic salvage...")
-            
-            # Try to fix common truncation issues and parse JSON
-            fixed_text = text.strip()
-            # If JSON starts with markdown code block, extract it
-            if "```json" in fixed_text:
-                json_start = fixed_text.find("{")
-                if json_start >= 0:
-                    fixed_text = fixed_text[json_start:]
-            
-            # Try to fix truncated JSON by adding missing closures
-            if not fixed_text.endswith("}"):
-                # Count braces to see what we're missing
-                open_braces = fixed_text.count("{")
-                close_braces = fixed_text.count("}")
-                open_brackets = fixed_text.count("[")
-                close_brackets = fixed_text.count("]")
-                
-                # Add missing quotes if string is cut off
-                if fixed_text.count('"') % 2 == 1:
-                    fixed_text += '"'
-                
-                # Close arrays and objects as needed
-                while close_brackets < open_brackets:
-                    fixed_text += "]"
-                    close_brackets += 1
-                while close_braces < open_braces:
-                    fixed_text += "}"
-                    close_braces += 1
-                    
-                print(f"[DEBUG] Attempting to fix truncated JSON: '{fixed_text}'")
-                
-                try:
-                    data = _json.loads(fixed_text)
-                    anchors = data.get("anchors_to_refine", [])
-                    for it in anchors if isinstance(anchors, (list, tuple)) else []:
-                        try:
-                            anchor_id = it.get("id", 0)
-                            # Handle string IDs
-                            if isinstance(anchor_id, str):
-                                anchor_id = int(anchor_id)
-                            norm.append({"id": int(anchor_id), "reason": str(it.get("reason", ""))})
-                        except Exception:
-                            pass
-                    print(f"[DEBUG] Fixed and parsed {len(norm)} anchors from truncated JSON")
-                except Exception as e:
-                    print(f"[DEBUG] JSON fix attempt failed: {e}")
-            
-            # Fallback: try to directly capture the list after anchors_to_refine
-            if not norm:
-                m = re.search(r"anchors\s*_?to\s*_?refine\s*:\s*(\[.*?\])", text, re.IGNORECASE | re.DOTALL)
-                if m:
-                    try:
-                        sub = m.group(1)
-                        parsed = _json.loads(sub)
-                        if isinstance(parsed, list):
-                            for it in parsed:
-                                try:
-                                    anchor_id = it.get("id", 0)
-                                    if isinstance(anchor_id, str):
-                                        anchor_id = int(anchor_id)
-                                    norm.append({"id": int(anchor_id), "reason": str(it.get("reason", ""))})
-                                except Exception:
-                                    pass
-                        print(f"[DEBUG] Salvaged {len(norm)} anchors from regex pattern")
-                    except Exception as e:
-                        print(f"[DEBUG] Regex salvage failed: {e}")
-                else:
-                    print(f"[DEBUG] No anchor pattern found in response")
-        
+            print(f"[ERROR] Failed to parse anchors from VLM response")
+            raise RuntimeError(f"VLM anchor selection failed. Raw response: '{text}'")
+
         print(f"[DEBUG] Final anchors count: {len(norm)}")
         return {"anchors_to_refine": norm, "raw_text": text}
 
     def quadrant_edits(self, quadrant_crop_rgb: np.ndarray, instance: str, anchor_id: int, global_reason: Optional[str] = None, anchor_reason: Optional[str] = None) -> Dict[str, Any]:
         prompts = build_quadrant_prompt(instance, anchor_id, global_reason, anchor_hint=anchor_reason)
         text = self._inference([quadrant_crop_rgb], prompts["system"], prompts["user"])  # type: ignore
-        
+
         # DEBUG: Print raw VLM response
         print(f"[DEBUG] Raw VLM quadrant response for anchor {anchor_id}: '{text}'")
         print(f"[DEBUG] Response length: {len(text)} chars")
-        
+
         data = try_parse_json(text)
         edits = data.get("edits", [])
         norm = []
@@ -184,58 +116,12 @@ class QwenVLM(VLMBase):
                     norm.append({"region_id": rid, "action": act, "why": why})
             except Exception:
                 pass
-        
-        # If no edits parsed, try to fix truncated JSON similar to anchor processing
+
+        # No fallback - raise error if parsing fails
         if not norm:
-            import re, json as _json
-            print(f"[DEBUG] No edits parsed from JSON, attempting repair for anchor {anchor_id}...")
-            
-            # Try to fix common truncation issues and parse JSON
-            fixed_text = text.strip()
-            # If JSON starts with markdown code block, extract it
-            if "```json" in fixed_text:
-                json_start = fixed_text.find("{")
-                if json_start >= 0:
-                    fixed_text = fixed_text[json_start:]
-            
-            # Try to fix truncated JSON by adding missing closures
-            if not fixed_text.endswith("}"):
-                # Count braces to see what we're missing
-                open_braces = fixed_text.count("{")
-                close_braces = fixed_text.count("}")
-                open_brackets = fixed_text.count("[")
-                close_brackets = fixed_text.count("]")
-                
-                # Add missing quotes if string is cut off
-                if fixed_text.count('"') % 2 == 1:
-                    fixed_text += '"'
-                
-                # Close arrays and objects as needed
-                while close_brackets < open_brackets:
-                    fixed_text += "]"
-                    close_brackets += 1
-                while close_braces < open_braces:
-                    fixed_text += "}"
-                    close_braces += 1
-                    
-                print(f"[DEBUG] Attempting to fix truncated JSON: '{fixed_text}'")
-                
-                try:
-                    data = _json.loads(fixed_text)
-                    edits = data.get("edits", [])
-                    for it in edits if isinstance(edits, (list, tuple)) else []:
-                        try:
-                            rid = int(it.get("region_id", 0))
-                            act = str(it.get("action", ""))
-                            why = str(it.get("why", ""))
-                            if rid in (1, 2, 3, 4) and act in ("pos", "neg"):
-                                norm.append({"region_id": rid, "action": act, "why": why})
-                        except Exception:
-                            pass
-                    print(f"[DEBUG] Fixed and parsed {len(norm)} edits from truncated JSON")
-                except Exception as e:
-                    print(f"[DEBUG] JSON fix attempt failed: {e}")
-        
+            print(f"[ERROR] Failed to parse edits from VLM response for anchor {anchor_id}")
+            raise RuntimeError(f"VLM quadrant edit failed for anchor {anchor_id}. Raw response: '{text}'")
+
         print(f"[DEBUG] Final edits count for anchor {anchor_id}: {len(norm)}")
         return {"anchor_id": int(anchor_id), "edits": norm, "raw_text": text}
 
@@ -265,11 +151,11 @@ class QwenVLM(VLMBase):
         # Local python inference with Qwen2.5-VL-AWQ
         if self._local_model is None:
             self._load_local_model()
-        
+
         if self._local_model is None:
             print(f"[WARN] Model not loaded from {self.model_dir}, returning empty JSON")
             return "{}"
-            
+
         try:
             import torch
             from PIL import Image
@@ -277,9 +163,10 @@ class QwenVLM(VLMBase):
                 from qwen_vl_utils import process_vision_info
             except Exception:
                 process_vision_info = None
+
             # Convert numpy images to PIL Images
             pil_images = [Image.fromarray(img.astype(np.uint8)) for img in images]
-            
+
             # Prepare messages in Qwen2.5-VL format
             content = []
             for pil_img in pil_images:
@@ -289,12 +176,29 @@ class QwenVLM(VLMBase):
                 {"role": "system", "content": system},
                 {"role": "user", "content": content}
             ]
-            
+
             # Apply chat template
             text = self._processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
-            
+
+            # DEBUG: Save prompt to file for debugging
+            import os
+            debug_dir = os.path.join(os.path.dirname(__file__), "../../debug")
+            os.makedirs(debug_dir, exist_ok=True)
+
+            import time
+            timestamp = int(time.time())
+            with open(os.path.join(debug_dir, f"prompt_{timestamp}.txt"), "w", encoding="utf-8") as f:
+                f.write("=== SYSTEM ===\n")
+                f.write(system)
+                f.write("\n\n=== USER ===\n")
+                f.write(user)
+                f.write("\n\n=== FINAL PROMPT ===\n")
+                f.write(text)
+
+            print(f"[DEBUG] Prompt saved to debug/prompt_{timestamp}.txt")
+
             # Process inputs per Qwen docs
             image_inputs = None
             video_inputs = None
@@ -310,10 +214,10 @@ class QwenVLM(VLMBase):
                 return_tensors="pt",
                 padding=True,
             )
-            
+
             # Move to device
             inputs = inputs.to(self._model.device)
-            
+
             # Generate response (greedy by default to avoid CUDA multinomial assertions)
             gen_kwargs = {
                 "max_new_tokens": int(self.gen_max_new_tokens),
@@ -330,7 +234,7 @@ class QwenVLM(VLMBase):
                     **inputs,
                     **gen_kwargs,
                 )
-            
+
             # Decode response
             generated_ids_trimmed = [
                 out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -338,12 +242,12 @@ class QwenVLM(VLMBase):
             output_text = self._processor.batch_decode(
                 generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
             )[0]
-            
+
             # Clear GPU cache to free memory for other operations
             torch.cuda.empty_cache()
-            
+
             return output_text.strip()
-            
+
         except Exception as e:
             print(f"[WARN] Local inference failed: {e}")
             return "{}"
