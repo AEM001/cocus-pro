@@ -344,12 +344,16 @@ def get_contour_tangent_at_point(point: Tuple[float, float], contour: np.ndarray
 
 def create_tangent_square_visualization(image: np.ndarray, anchor_point: Tuple[float, float],
                                       roi_box: ROIBox, mask: np.ndarray, anchor_id: int,
-                                      ratio: float = 0.8) -> Tuple[np.ndarray, Tuple[int, int, int, int, Tuple[float, float], Tuple[float, float]]]:
-    """基于切线的内外正方形可视化"""
+                                      ratio: float = 0.8, min_square_px: float = 120.0) -> Tuple[np.ndarray, Tuple[int, int, int, int, Tuple[float, float], Tuple[float, float]]]:
+    """基于切线的内外正方形可视化
+
+    ratio: 与ROI短边的比例
+    min_square_px: 本轮允许的小正方形最小边长（像素），用于避免过小导致不稳定
+    """
     # 计算正方形半边长
     roi_width = roi_box.x1 - roi_box.x0
     roi_height = roi_box.y1 - roi_box.y0
-    base_size = max(120.0, float(ratio) * float(min(roi_width, roi_height)))
+    base_size = max(float(min_square_px), float(ratio) * float(min(roi_width, roi_height)))
     half_size = base_size / 2.0
 
     # 锚点坐标
@@ -633,6 +637,24 @@ def main():
         anchor_vis = draw_anchors_on_image_with_points(image, roi_box, current_mask, current_anchor_points)
         save_image(os.path.join(output_dir, f'round{round_idx + 1}_step2_anchors.png'), anchor_vis)
 
+        # 本轮 ratio 调整策略：第二轮自动降为原来的三分之一
+        round_ratio = float(args.ratio)
+        if (round_idx == 1):
+            new_ratio = max(0.05, float(args.ratio) / 3.0)
+            print(f"[第二轮比例] 自动将ratio从 {args.ratio} 调整为 {new_ratio} (1/3 规则)")
+            round_ratio = new_ratio
+        
+        # 动态最小边长度：随round_ratio按比例缩放，避免固定120导致二轮无效
+        base_min_px = 120.0
+        try:
+            # 如果未来暴露参数，可改为args.min_square_px
+            base_min_px = 120.0
+        except Exception:
+            base_min_px = 120.0
+        effective_min_square_px = max(40.0, base_min_px * (round_ratio / float(args.ratio)))
+        # 打印调试信息
+        print(f"[本轮尺寸] ratio={round_ratio:.4f}, min_square_px={effective_min_square_px:.1f}")
+
         # 传给VLM前缩放，降低显存压力
         anchor_vis_vlm = _resize_for_vlm(anchor_vis, int(args.vlm_max_side))
         anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name, global_reason=semantic_reason)
@@ -738,7 +760,7 @@ def main():
             # 步骤3: 创建切线内外区域可视化
             print(f"步骤3: 为锚点 {anchor_id} 创建切线内外区域...")
             tangent_vis, square_bounds = create_tangent_square_visualization(
-                image, anchor_point, roi_box, current_mask, anchor_id, ratio=float(args.ratio)
+                image, anchor_point, roi_box, current_mask, anchor_id, ratio=round_ratio, min_square_px=effective_min_square_px
             )
             save_image(os.path.join(output_dir, f'round{round_idx + 1}_step3_anchor{anchor_id}_tangent_square.png'), tangent_vis)
 
@@ -767,10 +789,10 @@ def main():
         print("[INFO] 卸载VLM模型释放内存...")
         vlm.unload_model()
 
-        # 计算小正方形的尺寸（用于智能扩展BBox）
+        # 计算小正方形的尺寸（用于智能扩展BBox），按轮次动态最小值
         roi_width = roi_box.x1 - roi_box.x0
         roi_height = roi_box.y1 - roi_box.y0
-        square_size = max(120.0, float(args.ratio) * float(min(roi_width, roi_height)))
+        square_size = max(float(effective_min_square_px), float(round_ratio) * float(min(roi_width, roi_height)))
         
         # 步骤4: 使用收集的点进行sam分割（支持智能BBox扩展 + 局部更新门控）
         if all_pos_points or all_neg_points:
