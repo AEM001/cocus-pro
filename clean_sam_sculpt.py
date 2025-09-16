@@ -558,6 +558,7 @@ def main():
     ap.add_argument('--rounds', type=int, default=4, help='refinement rounds')
     ap.add_argument('--ratio', type=float, default=0.8, help='square ratio to ROI short side for tangent square crop')
     ap.add_argument('--vlm_max_side', type=int, default=720, help='resize long side before sending to VLM (<=0 to disable)')
+    ap.add_argument('--first_round_apply_all', action='store_true', help='In round 1, apply ALL returned anchors (batch) by generating points for each and updating mask once')
     args = ap.parse_args()
 
     sample_name = args.name
@@ -637,56 +638,76 @@ def main():
         anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name, global_reason=semantic_reason)
         selected_anchors = anchor_response.get('anchors_to_refine', [])
 
-        # 选择逻辑：
-        # 1) 过滤被禁用ID
-        # 2) 默认使用过滤后列表的第一个（或原列表的第一个）
-        # 3) 若与上一轮相同且上一轮收益很小，则尝试次优候选，并将上一轮ID加入禁用列表（后续永久跳过）
-        chosen_anchor = None
-        if isinstance(selected_anchors, list) and selected_anchors:
-            # 过滤被禁用的候选
-            filtered = []
-            for it in selected_anchors:
+        # 首轮批处理选项：如果启用，则在第一轮对返回的全部锚点进行处理（生成象限指令并合并点）
+        first_round_batch = bool(args.first_round_apply_all) and (round_idx == 0)
+        if first_round_batch:
+            # 过滤非法/重复ID
+            seen = set()
+            batch_anchors = []
+            for it in selected_anchors if isinstance(selected_anchors, list) else []:
                 try:
                     aid = int(it.get('id', -1))
                 except Exception:
-                    aid = -1
-                if 1 <= aid <= 8 and aid not in banned_anchor_ids:
-                    filtered.append(it)
-            candidates = filtered if filtered else selected_anchors
+                    continue
+                if 1 <= aid <= 8 and aid not in seen:
+                    seen.add(aid)
+                    batch_anchors.append(it)
+            if not batch_anchors:
+                print("[WARN] 首轮批处理无有效锚点，使用fallback锚点1")
+                batch_anchors = [{"id": 1, "reason": "fallback for empty batch"}]
+            selected_anchors = batch_anchors
+            print(f"[批处理] 首轮批量执行 {len(selected_anchors)} 个锚点: {[int(a.get('id',-1)) for a in selected_anchors]}")
+        else:
+            # 选择逻辑：
+            # 1) 过滤被禁用ID
+            # 2) 默认使用过滤后列表的第一个（或原列表的第一个）
+            # 3) 若与上一轮相同且上一轮收益很小，则尝试次优候选，并将上一轮ID加入禁用列表（后续永久跳过）
+            chosen_anchor = None
+            if isinstance(selected_anchors, list) and selected_anchors:
+                # 过滤被禁用的候选
+                filtered = []
+                for it in selected_anchors:
+                    try:
+                        aid = int(it.get('id', -1))
+                    except Exception:
+                        aid = -1
+                    if 1 <= aid <= 8 and aid not in banned_anchor_ids:
+                        filtered.append(it)
+                candidates = filtered if filtered else selected_anchors
 
-            chosen_anchor = candidates[0]
-            if prev_selected_anchor_id is not None and prev_change_pixels is not None:
-                same_as_prev = int(chosen_anchor.get('id', -1)) == int(prev_selected_anchor_id)
-                if same_as_prev and prev_change_pixels < min_change_threshold and len(candidates) > 1:
-                    # 仅当次优评分不明显更差时才替换
-                    top_score = chosen_anchor.get('score', None)
-                    replaced = False
-                    for alt in candidates[1:]:
-                        alt_id = int(alt.get('id', -1))
-                        if not (1 <= alt_id <= 8):
-                            continue
-                        if alt_id == prev_selected_anchor_id:
-                            continue
-                        alt_score = alt.get('score', None)
-                        if top_score is None or alt_score is None or float(alt_score) >= float(top_score) - alt_score_margin:
-                            print(f"[去重降权] 上一轮锚点{prev_selected_anchor_id}改变量较小({prev_change_pixels}px)，本轮优先改用次优候选锚点{alt_id}，并将{prev_selected_anchor_id}加入禁用列表")
-                            chosen_anchor = alt
-                            banned_anchor_ids.add(int(prev_selected_anchor_id))
-                            replaced = True
-                            break
-                    if not replaced and filtered and filtered[0] != chosen_anchor:
-                        # 若替换失败但有过滤候选，则使用过滤后的首选
-                        chosen_anchor = filtered[0]
-            # 最终仅使用一个锚点进入后续流程
-            selected_anchors = [chosen_anchor]
-        
-        # VLM现在可能返回多个锚点，保持兼容：如果依然为空则fallback
-        if not selected_anchors:
-            print("[WARN] VLM未选择任何锚点，使用fallback策略选择锚点1")
-            print(f"[DEBUG] VLM原始响应: '{anchor_response.get('raw_text', 'N/A')}'")
-            fallback_anchor = {"id": 1, "reason": "fallback selection when VLM returned empty"}
-            selected_anchors = [fallback_anchor]
-            print(f"[INFO] 使用fallback锚点: {selected_anchors}")
+                chosen_anchor = candidates[0]
+                if prev_selected_anchor_id is not None and prev_change_pixels is not None:
+                    same_as_prev = int(chosen_anchor.get('id', -1)) == int(prev_selected_anchor_id)
+                    if same_as_prev and prev_change_pixels < min_change_threshold and len(candidates) > 1:
+                        # 仅当次优评分不明显更差时才替换
+                        top_score = chosen_anchor.get('score', None)
+                        replaced = False
+                        for alt in candidates[1:]:
+                            alt_id = int(alt.get('id', -1))
+                            if not (1 <= alt_id <= 8):
+                                continue
+                            if alt_id == prev_selected_anchor_id:
+                                continue
+                            alt_score = alt.get('score', None)
+                            if top_score is None or alt_score is None or float(alt_score) >= float(top_score) - alt_score_margin:
+                                print(f"[去重降权] 上一轮锚点{prev_selected_anchor_id}改变量较小({prev_change_pixels}px)，本轮优先改用次优候选锚点{alt_id}，并将{prev_selected_anchor_id}加入禁用列表")
+                                chosen_anchor = alt
+                                banned_anchor_ids.add(int(prev_selected_anchor_id))
+                                replaced = True
+                                break
+                        if not replaced and filtered and filtered[0] != chosen_anchor:
+                            # 若替换失败但有过滤候选，则使用过滤后的首选
+                            chosen_anchor = filtered[0]
+                # 最终仅使用一个锚点进入后续流程
+                selected_anchors = [chosen_anchor]
+            
+            # VLM现在可能返回多个锚点，保持兼容：如果依然为空则fallback
+            if not selected_anchors:
+                print("[WARN] VLM未选择任何锚点，使用fallback策略选择锚点1")
+                print(f"[DEBUG] VLM原始响应: '{anchor_response.get('raw_text', 'N/A')}'")
+                fallback_anchor = {"id": 1, "reason": "fallback selection when VLM returned empty"}
+                selected_anchors = [fallback_anchor]
+                print(f"[INFO] 使用fallback锚点: {selected_anchors}")
 
         # Fallback: if VLM returns no anchors, use a default anchor to keep pipeline going
         if not selected_anchors:
