@@ -875,20 +875,46 @@ def refine_mask_with_local_expansion(predictor: SamPredictor, image: np.ndarray,
             # 获取区域中心点
             region_center = get_tangent_region_center(square_bounds, region_id)
 
-            # 创建该区域的局部扩展框
-            local_box = create_local_expansion_box(anchor_point, region_center, image.shape[:2])
-
-            print(f"[INFO] 锚点局部扩展: 区域{region_id} ({region_center[0]:.1f}, {region_center[1]:.1f}) -> "
-                  f"扩展框({local_box[0]}, {local_box[1]}, {local_box[2]}, {local_box[3]})")
+            # 创建该区域的局部扩展框（基础窗口）
+            base_box = create_local_expansion_box(anchor_point, region_center, image.shape[:2])
 
             # 在局部区域进行SAM分割
             point_coords = np.array([region_center])
             point_labels = np.array([1 if action == 'pos' else 0])
 
+            # 根据正/负动作调整实际使用的预测框
+            if action == 'pos':
+                expand_margin = 20
+                x0 = max(0, int(min(base_box[0], region_center[0]) - expand_margin))
+                y0 = max(0, int(min(base_box[1], region_center[1]) - expand_margin))
+                x1 = min(image.shape[1], int(max(base_box[2], region_center[0]) + expand_margin))
+                y1 = min(image.shape[0], int(max(base_box[3], region_center[1]) + expand_margin))
+
+                # 根据区域中心相对窗口中心的偏移再做一次方向性扩展
+                cx = (base_box[0] + base_box[2]) / 2.0
+                cy = (base_box[1] + base_box[3]) / 2.0
+                offset = np.array(region_center) - np.array([cx, cy])
+                if offset[0] < 0:
+                    x0 = max(0, x0 + int(offset[0] * 0.5))
+                if offset[1] < 0:
+                    y0 = max(0, y0 + int(offset[1] * 0.5))
+                if offset[0] > 0:
+                    x1 = min(image.shape[1], x1 + int(offset[0] * 0.5))
+                if offset[1] > 0:
+                    y1 = min(image.shape[0], y1 + int(offset[1] * 0.5))
+
+                predict_box = np.array([x0, y0, x1, y1], dtype=int)
+            else:
+                # 负点：保持基础窗口，防止过度删除
+                predict_box = np.array(base_box, dtype=int)
+
+            print(f"[INFO] 锚点局部扩展: 区域{region_id} ({region_center[0]:.1f}, {region_center[1]:.1f}) -> "
+                  f"基础框({base_box[0]}, {base_box[1]}, {base_box[2]}, {base_box[3]}) / 实际框({predict_box[0]}, {predict_box[1]}, {predict_box[2]}, {predict_box[3]})")
+
             masks, scores, logits = predictor.predict(
                 point_coords=point_coords,
                 point_labels=point_labels,
-                box=np.array(local_box),
+                box=predict_box,
                 multimask_output=True,
             )
 
@@ -897,7 +923,7 @@ def refine_mask_with_local_expansion(predictor: SamPredictor, image: np.ndarray,
             best_mask = masks[best_idx]
 
             # 将局部结果融合到主掩码
-            x0, y0, x1, y1 = local_box
+            x0, y0, x1, y1 = map(int, predict_box)
             # SAM返回的是全图掩码，需要提取局部区域
             local_region = (best_mask[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
 
