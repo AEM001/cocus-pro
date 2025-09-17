@@ -111,12 +111,14 @@ def make_vertical_prompt(
         y = int(round(i * y_step))
         draw.rectangle([(0, y - line_thickness // 2), (w, y + line_thickness // 2)], fill=line_color)
 
-    # 标号：每一行中心 (w/2, (i-0.5)*y_step)
+    # 标号：每一行右边 (w-margin, (i-0.5)*y_step)
     for i in range(1, rows + 1):
         cy = int(round((i - 0.5) * y_step))
         text = str(i)
         tw, th = draw.textbbox((0, 0), text, font=font)[2:]
-        draw_text_with_outline(draw, (w // 2 - tw // 2, cy - th // 2), text, font, fill=text_color)
+        margin = max(10, tw + 10)  # 动态计算右边距
+        text_x = w - margin  # 右边对齐
+        draw_text_with_outline(draw, (text_x, cy - th // 2), text, font, fill=text_color)
 
     return canvas
 
@@ -142,12 +144,14 @@ def make_horizontal_prompt(
         x = int(round(j * x_step))
         draw.rectangle([(x - line_thickness // 2, 0), (x + line_thickness // 2, h)], fill=line_color)
 
-    # 标号：每一列中心 ((j-0.5)*x_step, h/2)
+    # 标号：每一列下边 ((j-0.5)*x_step, h-margin)
     for j in range(1, cols + 1):
         cx = int(round((j - 0.5) * x_step))
         text = str(j)
         tw, th = draw.textbbox((0, 0), text, font=font)[2:]
-        draw_text_with_outline(draw, (cx - tw // 2, h // 2 - th // 2), text, font, fill=text_color)
+        margin = max(10, th + 10)  # 动态计算下边距
+        text_y = h - margin  # 下边对齐
+        draw_text_with_outline(draw, (cx - tw // 2, text_y), text, font, fill=text_color)
 
     return canvas
 
