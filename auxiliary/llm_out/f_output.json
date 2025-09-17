@@ -1,6 +1,14 @@
 {
-  "instance": "camouflaged scorpionfish",
-  "ids_line_vertical": [3, 4, 5, 6, 7],
-  "ids_line_horizontal": [5, 6, 7, 8],
-  "reason": "The object being referred to is a camouflaged scorpionfish resting on the sandy seabed. Its body blending with the sand and rocks. The texture and outline of the fish, including its head and fins, are visible despite camouflage, confirming its presence in those segments."
+  "instance": "scorpionfish",
+  "ids_line_vertical": [
+    4,
+    5,
+    6
+  ],
+  "ids_line_horizontal": [
+    5,
+    6,
+    7
+  ],
+  "reason": "The scorpionfish is camouflaged against the sandy seabed. It is located in the central portion of the image, visible across segments 4-6 vertically and 5-7 horizontally, blending with the surrounding sand and rocks."
 }

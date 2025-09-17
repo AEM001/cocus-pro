@@ -1,0 +1,22 @@
+{
+  "timestamp": "2025-09-17T11:03:55.054220",
+  "summary": {
+    "total_images": 1,
+    "successful": 0,
+    "failed": 1,
+    "success_rate": 0.0,
+    "total_processing_time": 0,
+    "average_processing_time": 0.0
+  },
+  "results": [
+    {
+      "name": "f",
+      "image_path": "auxiliary/images/f.png",
+      "success": false,
+      "error": "网格生成失败: 命令失败: Command 'export DASHSCOPE_API_KEY='sk-a20473de00b94f668cbcd4d2725947b2' && conda activate camo-vlm && cd auxiliary/scripts && python make_region_prompts.py \\\n                --name f \\\n                --image ../images/f.png \\\n                --rows 9 \\\n                --cols 9' returned non-zero exit status 1.\n输出: \n错误: \nCondaError: Run 'conda init' before 'conda activate'\n\n",
+      "steps_completed": [],
+      "processing_time": 0,
+      "output_files": []
+    }
+  ]
+}

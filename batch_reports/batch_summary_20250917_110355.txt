@@ -1,0 +1,24 @@
+============================================================
+批量处理报告
+============================================================
+处理时间: 2025-09-17 11:03:55
+总图像数: 1
+成功: 0
+失败: 1
+成功率: 0.0%
+总处理时间: 0.0秒
+平均处理时间: 0.0秒/图像
+
+
+失败的图像:
+----------------------------------------
+❌ f: 网格生成失败: 命令失败: Command 'export DASHSCOPE_API_KEY='sk-a20473de00b94f668cbcd4d2725947b2' && conda activate camo-vlm && cd auxiliary/scripts && python make_region_prompts.py \
+                --name f \
+                --image ../images/f.png \
+                --rows 9 \
+                --cols 9' returned non-zero exit status 1.
+输出: 
+错误: 
+CondaError: Run 'conda init' before 'conda activate'
+
+

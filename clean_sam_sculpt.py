@@ -19,6 +19,7 @@ except ImportError:
     sys.exit(1)
 
 from sculptor.vlm.qwen import QwenVLM
+from sculptor.vlm.qwen_api import QwenAPIVLM
 
 
 class ROIBox:
@@ -564,6 +565,13 @@ def main():
     ap.add_argument('--vlm_max_side', type=int, default=720, help='resize long side before sending to VLM (<=0 to disable)')
     ap.add_argument('--first_round_apply_all', action='store_true', help='In round 1, apply ALL returned anchors (batch) by generating points for each and updating mask once')
     ap.add_argument('--second_round_apply_all', action='store_true', help='In round 2, apply ALL returned anchors (batch) similar to round 1')
+    ap.add_argument('--use-api', action='store_true', help='Use Qwen API instead of local model')
+    ap.add_argument('--api-key', help='API key for Qwen API (default: from DASHSCOPE_API_KEY env var)')
+    ap.add_argument('--api-model', default='qwen-vl-plus-latest', help='API model name')
+    ap.add_argument('--use-openai-api', action='store_true', help='Use OpenAI compatible API mode')
+    ap.add_argument('--high-resolution', action='store_true', help='Enable high resolution mode for API')
+    ap.add_argument('--clean-output', action='store_true', help='Only keep final mask and instance info, remove intermediate files')
+    ap.add_argument('--output-format', choices=['png', 'jpg'], default='png', help='Output mask format')
     args = ap.parse_args()
 
     sample_name = args.name
@@ -606,10 +614,27 @@ def main():
     print("加载SAM模型...")
     predictor = load_sam_model()
 
-    # 初始化VLM (仅Qwen，使用本地AWQ模型)
-    print("初始化VLM (Qwen)...")
-    qwen_dir = args.qwen_dir or os.environ.get('QWEN_VL_MODEL_DIR', os.path.join(base_dir, 'models', 'Qwen2.5-VL-3B-Instruct'))
-    vlm = QwenVLM(mode='local', model_dir=qwen_dir, gen_max_new_tokens=128, do_sample=False)
+    # 初始化VLM (支持本地模型或API)
+    if args.use_api:
+        print("初始化VLM (Qwen API)...")
+        try:
+            vlm = QwenAPIVLM(
+                api_key=args.api_key,
+                model_name=args.api_model,
+                use_dashscope=not args.use_openai_api,
+                high_resolution=args.high_resolution,
+                max_tokens=512,  # 增加到512防止截断
+                temperature=0.0
+            )
+        except Exception as e:
+            print(f"[ERROR] API初始化失败: {e}")
+            print("[INFO] 回退到本地模型...")
+            qwen_dir = args.qwen_dir or os.environ.get('QWEN_VL_MODEL_DIR', os.path.join(base_dir, 'models', 'Qwen2.5-VL-3B-Instruct'))
+            vlm = QwenVLM(mode='local', model_dir=qwen_dir, gen_max_new_tokens=128, do_sample=False)
+    else:
+        print("初始化VLM (本地Qwen模型)...")
+        qwen_dir = args.qwen_dir or os.environ.get('QWEN_VL_MODEL_DIR', os.path.join(base_dir, 'models', 'Qwen2.5-VL-3B-Instruct'))
+        vlm = QwenVLM(mode='local', model_dir=qwen_dir, gen_max_new_tokens=128, do_sample=False)
 
     # 步骤1: 生成初始SAM掩码
     print("步骤1: 生成初始SAM掩码...")
@@ -788,7 +813,10 @@ def main():
         
         # 卸载VLM模型以释放GPU内存供SAM使用
         print("[INFO] 卸载VLM模型释放内存...")
-        vlm.unload_model()
+        if hasattr(vlm, 'unload_model'):
+            vlm.unload_model()
+        elif hasattr(vlm, 'cleanup'):
+            vlm.cleanup()
 
         # 计算小正方形的尺寸（用于智能扩展BBox），按轮次动态最小值
         roi_width = roi_box.x1 - roi_box.x0
@@ -855,16 +883,47 @@ def main():
             prev_change_pixels = 0
 
     # 保存最终结果
-    save_image(os.path.join(output_dir, 'final_result.png'), current_mask)
+    final_mask_name = f'final_mask.{args.output_format}'
+    save_image(os.path.join(output_dir, final_mask_name), current_mask)
 
-    # 创建最终可视化
-    final_vis = image.copy()
-    final_vis[current_mask > 0] = final_vis[current_mask > 0] * 0.6 + np.array([0, 255, 0]) * 0.4
-    save_image(os.path.join(output_dir, 'final_visualization.png'), final_vis)
+    # 保存instance信息到txt文件
+    instance_info_path = os.path.join(output_dir, 'instance_info.txt')
+    with open(instance_info_path, 'w', encoding='utf-8') as f:
+        f.write(f"Sample: {sample_name}\n")
+        f.write(f"Instance: {instance_name}\n")
+        if semantic_reason:
+            f.write(f"Description: {semantic_reason}\n")
+        f.write(f"Final mask pixels: {np.sum(current_mask > 0)}\n")
+        f.write(f"ROI: ({roi_box.x0:.1f}, {roi_box.y0:.1f}, {roi_box.x1:.1f}, {roi_box.y1:.1f})\n")
+        f.write(f"Processing rounds: {max_rounds}\n")
+    
+    # 如果启用清理模式，删除中间文件
+    if args.clean_output:
+        import glob
+        # 保留的文件
+        keep_files = {final_mask_name, 'instance_info.txt'}
+        
+        # 删除其他文件
+        all_files = glob.glob(os.path.join(output_dir, '*'))
+        for file_path in all_files:
+            filename = os.path.basename(file_path)
+            if filename not in keep_files:
+                try:
+                    os.remove(file_path)
+                    print(f"[CLEAN] 已删除: {filename}")
+                except Exception as e:
+                    print(f"[WARN] 无法删除 {filename}: {e}")
+    else:
+        # 创建最终可视化（仅在非清理模式下）
+        final_vis = image.copy()
+        final_vis[current_mask > 0] = final_vis[current_mask > 0] * 0.6 + np.array([0, 255, 0]) * 0.4
+        save_image(os.path.join(output_dir, 'final_visualization.png'), final_vis)
 
     print("\n=== 清理版重构完成! ===")
     print(f"最终掩码像素数: {np.sum(current_mask > 0)}")
     print(f"输出目录: {output_dir}")
+    if args.clean_output:
+        print(f"[CLEAN] 输出已清理，仅保留: {final_mask_name}, instance_info.txt")
 
 
 if __name__ == "__main__":
