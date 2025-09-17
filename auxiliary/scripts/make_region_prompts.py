@@ -224,7 +224,7 @@ def main():
     parser.add_argument("--name", help="图片名（不含扩展名）。设置后可省略 --image")
     parser.add_argument("--rows", type=int, default=9, help="行数，默认9")
     parser.add_argument("--cols", type=int, default=9, help="列数，默认9")
-    parser.add_argument("--outdir", default="./out", help="输出根目录，默认 ./out")
+    parser.add_argument("--outdir", default="../out", help="输出根目录，默认 ../out")
     parser.add_argument("--line-thickness", dest="line_thickness", type=int, default=3, help="分割线粗细（像素），默认3")
     parser.add_argument("--font-size", dest="font_size", type=int, help="标号字体大小；优先于 --font-scale")
     parser.add_argument("--font-scale", dest="font_scale", type=float, default=0.6, help="相对单元格最短边的比例(0~1)来确定字号，默认0.6")
@@ -234,9 +234,17 @@ def main():
     # 解析图片路径
     image_path = args.image
     if not image_path and args.name:
-        image_path = os.path.join("./images", f"{args.name}.png")
+        # 优先尝试jpg格式（COD10K数据集）
+        jpg_path = os.path.join("../../dataset/COD10K_TEST_DIR/Imgs", f"{args.name}.jpg")
+        png_path = os.path.join("./images", f"{args.name}.png")
+        if os.path.exists(jpg_path):
+            image_path = jpg_path
+        elif os.path.exists(png_path):
+            image_path = png_path
+        else:
+            image_path = jpg_path  # 默认使用jpg路径
     if not image_path:
-        raise ValueError("必须提供 --image 或 --name（将从 images/{name}.png 推断）")
+        raise ValueError("必须提供 --image 或 --name（将从 dataset/COD10K_TEST_DIR/Imgs/{name}.jpg 推断）")
 
     merged = dict(
         image=image_path,

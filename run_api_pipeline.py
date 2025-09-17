@@ -137,9 +137,12 @@ def main():
     print("📊 步骤1: 生成网格标注图")
     print("="*50)
     
-    grid_cmd = f"""cd auxiliary/scripts && python make_region_prompts.py \\
+    # 使用动态Python路径和新的图像路径
+    import sys
+    python_path = sys.executable
+    grid_cmd = f"""cd auxiliary/scripts && {python_path} make_region_prompts.py \\
         --name {name} \\
-        --image ../images/{name}.png \\
+        --image ../../dataset/COD10K_TEST_DIR/Imgs/{name}.jpg \\
         --rows {args.grid_size} \\
         --cols {args.grid_size}"""
     
@@ -165,7 +168,7 @@ def main():
     print("🎯 步骤2: API目标检测")
     print("="*50)
     
-    detection_cmd = f"""cd auxiliary/scripts && python detect_target_api.py \\
+    detection_cmd = f"""cd auxiliary/scripts && {python_path} detect_target_api.py \\
         --name {name} \\
         --target "{args.target}" \\
         --model {args.model} \\
@@ -196,7 +199,7 @@ def main():
     print("📦 步骤3: 生成SAM输入")
     print("="*50)
     
-    build_cmd = f"""python auxiliary/scripts/build_prior_and_boxes.py \\
+    build_cmd = f"""{python_path} auxiliary/scripts/build_prior_and_boxes.py \\
         --name {name} \\
         --meta auxiliary/scripts/out/{name}/{name}_meta.json \\
         --pred auxiliary/llm_out/{name}_output.json"""
@@ -232,12 +235,11 @@ def main():
     print("🎨 步骤4: SAM精修 (使用API)")
     print("="*50)
     
-    sam_cmd = f"""python clean_sam_sculpt.py \\
+    sam_cmd = f"""{python_path} clean_sam_sculpt.py \\
         --name {name} \\
         --rounds {args.rounds} \\
         --ratio {args.ratio} \\
-        --vlm_max_side {args.vlm_max_side} \\
-        --use-api"""
+        --vlm_max_side {args.vlm_max_side}"""
     
     if args.api_key:
         sam_cmd += f" --api-key {args.api_key}"

@@ -193,17 +193,17 @@ def main():
     ap.add_argument("--image", help="原图路径；若省略且提供 --name，则为 images/{name}.png")
     ap.add_argument("--meta", help="meta.json 路径；若省略且提供 --name，则为 out/{name}/{name}_meta.json")
     ap.add_argument("--pred", help="LLM输出json路径；若省略且提供 --name，则为 llm_out/{name}_output.json")
-    ap.add_argument("--out",  default="box_out", help="输出根目录，默认 box_out")
+    ap.add_argument("--out",  default="../box_out", help="输出根目录，默认 ../box_out")
     args = ap.parse_args()
 
     # 推断相对路径
     if args.name:
         if not args.image:
-            args.image = f"images/{args.name}.png"
+            args.image = f"../../dataset/COD10K_TEST_DIR/Imgs/{args.name}.jpg"
         if not args.meta:
-            args.meta = f"out/{args.name}/{args.name}_meta.json"
+            args.meta = f"../out/{args.name}/{args.name}_meta.json"
         if not args.pred:
-            args.pred = f"llm_out/{args.name}_output.json"
+            args.pred = f"../llm_out/{args.name}_output.json"
 
     if not all([args.image, args.meta, args.pred]):
         raise ValueError("必须提供 image、meta、pred 路径，或提供 --name 以自动推断")

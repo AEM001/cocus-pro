@@ -18,7 +18,6 @@ except ImportError:
     print("请安装segment-anything: pip install segment-anything")
     sys.exit(1)
 
-from sculptor.vlm.qwen import QwenVLM
 from sculptor.vlm.qwen_api import QwenAPIVLM
 
 
@@ -64,6 +63,8 @@ def load_sam_model(checkpoint_path: str = "models/sam_vit_b_01ec64.pth", device:
 def load_image(path: str) -> np.ndarray:
     """加载图像"""
     img = cv2.imread(path)
+    if img is None:
+        raise FileNotFoundError(f"无法加载图像: {path}，请检查文件路径和完整性")
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
@@ -542,13 +543,11 @@ def main():
     import argparse
     ap = argparse.ArgumentParser(description='SAM+Qwen refinement with single-anchor optimization')
     ap.add_argument('--name', default='f', help='sample name (e.g., f, dog, q)')
-    ap.add_argument('--qwen_dir', default='/home/albert/code/CV/models/Qwen2.5-VL-3B-Instruct', help='Qwen2.5-VL model dir (3B recommended)')
     ap.add_argument('--rounds', type=int, default=1, help='refinement rounds')
     ap.add_argument('--ratio', type=float, default=0.6, help='square ratio to ROI short side for tangent square crop')
     ap.add_argument('--vlm_max_side', type=int, default=720, help='resize long side before sending to VLM (<=0 to disable)')
     ap.add_argument('--first_round_apply_all', action='store_true', default=True, help='In round 1, apply ALL returned anchors (batch) by generating points for each and updating mask once')
     ap.add_argument('--second_round_apply_all', action='store_true', help='In round 2, apply ALL returned anchors (batch) similar to round 1')
-    ap.add_argument('--use-api', action='store_true', help='Use Qwen API instead of local model')
     ap.add_argument('--api-key', help='API key for Qwen API (default: from DASHSCOPE_API_KEY env var)')
     ap.add_argument('--api-model', default='qwen-vl-plus-latest', help='API model name')
     ap.add_argument('--use-openai-api', action='store_true', help='Use OpenAI compatible API mode')
@@ -561,7 +560,7 @@ def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
     # 输入文件路径
-    image_path = os.path.join(base_dir, 'auxiliary', 'images', f'{sample_name}.png')
+    image_path = os.path.join(base_dir, 'dataset', 'COD10K_TEST_DIR', 'Imgs', f'{sample_name}.jpg')
     roi_json_path = os.path.join(base_dir, 'auxiliary', 'box_out', sample_name, f'{sample_name}_sam_boxes.json')
 
     # 加载语义信息（实例名称和推理原因）
@@ -597,27 +596,20 @@ def main():
     print("加载SAM模型...")
     predictor = load_sam_model()
 
-    # 初始化VLM (支持本地模型或API)
-    if args.use_api:
-        print("初始化VLM (Qwen API)...")
-        try:
-            vlm = QwenAPIVLM(
-                api_key=args.api_key,
-                model_name=args.api_model,
-                use_dashscope=not args.use_openai_api,
-                high_resolution=args.high_resolution,
-                max_tokens=512,  # 增加到512防止截断
-                temperature=0.0
-            )
-        except Exception as e:
-            print(f"[ERROR] API初始化失败: {e}")
-            print("[INFO] 回退到本地模型...")
-            qwen_dir = args.qwen_dir or os.environ.get('QWEN_VL_MODEL_DIR', os.path.join(base_dir, 'models', 'Qwen2.5-VL-3B-Instruct'))
-            vlm = QwenVLM(mode='local', model_dir=qwen_dir, gen_max_new_tokens=128, do_sample=False)
-    else:
-        print("初始化VLM (本地Qwen模型)...")
-        qwen_dir = args.qwen_dir or os.environ.get('QWEN_VL_MODEL_DIR', os.path.join(base_dir, 'models', 'Qwen2.5-VL-3B-Instruct'))
-        vlm = QwenVLM(mode='local', model_dir=qwen_dir, gen_max_new_tokens=128, do_sample=False)
+    # 初始化VLM (仅API模式)
+    print("初始化VLM (Qwen API)...")
+    try:
+        vlm = QwenAPIVLM(
+            api_key=args.api_key,
+            model_name=args.api_model,
+            use_dashscope=not args.use_openai_api,
+            high_resolution=args.high_resolution,
+            max_tokens=512,  # 增加到512防止截断
+            temperature=0.0
+        )
+    except Exception as e:
+        print(f"[ERROR] API初始化失败: {e}")
+        raise RuntimeError(f"API初始化失败，请检查API密钥和网络连接: {e}")
 
     # 步骤1: 生成初始SAM掩码
     print("步骤1: 生成初始SAM掩码...")

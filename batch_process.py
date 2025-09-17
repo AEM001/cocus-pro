@@ -109,15 +109,18 @@ def process_single_image(name: str, image_path: str, args) -> Dict:
         # 设置目标查询
         target_query = args.target or DEFAULT_TARGETS.get(name, f'find the camouflaged object in {name}')
         
-        # 构建基本命令参数 - 直接使用python路径
-        python_path = "/home/albert/anaconda3/envs/camo-vlm/bin/python"
+        # 构建基本命令参数 - 使用动态Python路径
+        import sys
+        python_path = sys.executable
         base_env = f"export DASHSCOPE_API_KEY='{args.api_key}'"
         
         # 步骤1：生成网格标注图
         if not args.skip_grid:
+            # 使用dataset/COD10K_TEST_DIR/Imgs作为图像输入路径
+            img_filename = f"{name}.jpg"  # COD10K数据集使用jpg格式
             grid_cmd = f"""{base_env} && cd auxiliary/scripts && {python_path} make_region_prompts.py \\
                 --name {name} \\
-                --image ../images/{os.path.basename(image_path)} \\
+                --image ../../dataset/COD10K_TEST_DIR/Imgs/{img_filename} \\
                 --rows {args.grid_size} \\
                 --cols {args.grid_size}"""
             
@@ -159,22 +162,21 @@ def process_single_image(name: str, image_path: str, args) -> Dict:
                 return result
             result['steps_completed'].append('sam_input_generation')
         
-        # 步骤4：SAM精修
+        # 步骤4：SAM精修（仅API模式）
         if not args.skip_sculpt:
             sculpt_cmd = f"""{base_env} && {python_path} clean_sam_sculpt.py \\
                 --name {name} \\
                 --rounds {args.rounds} \\
                 --ratio {args.ratio} \\
                 --vlm_max_side {args.vlm_max_side} \\
-                --output-format {args.output_format}"""
+                --output-format {args.output_format} \\
+                --api-model {args.api_model}"""
             
             # API选项
-            if args.use_api:
-                sculpt_cmd += f" --use-api --api-model {args.api_model}"
-                if args.use_openai_api:
-                    sculpt_cmd += " --use-openai-api"
-                if args.high_resolution:
-                    sculpt_cmd += " --high-resolution"
+            if args.use_openai_api:
+                sculpt_cmd += " --use-openai-api"
+            if args.high_resolution:
+                sculpt_cmd += " --high-resolution"
             
             # 清理输出选项
             if args.clean_output:
@@ -273,7 +275,7 @@ def main():
     parser = argparse.ArgumentParser(description="批量处理图像文件")
     
     # 基本参数
-    parser.add_argument('--image-dir', default='auxiliary/images', help='图像文件目录')
+    parser.add_argument('--image-dir', default='dataset/COD10K_TEST_DIR/Imgs', help='图像文件目录')
     parser.add_argument('--include', nargs='+', help='只处理指定的图像名称 (不含扩展名)')
     parser.add_argument('--exclude', nargs='+', help='排除指定的图像名称 (不含扩展名)')
     parser.add_argument('--target', help='统一的目标检测查询，覆盖默认映射')
@@ -281,7 +283,7 @@ def main():
     # API参数
     parser.add_argument('--api-key', help='API密钥 (默认从环境变量获取)')
     parser.add_argument('--api-model', default='qwen-vl-plus-latest', help='API模型名称')
-    parser.add_argument('--use-api', action='store_true', help='使用API模式')
+    parser.add_argument('--use-api', action='store_true', default=True, help='使用API模式（默认启用）')
     parser.add_argument('--use-openai-api', action='store_true', help='使用OpenAI兼容模式')
     parser.add_argument('--high-resolution', action='store_true', help='启用高分辨率模式')
     

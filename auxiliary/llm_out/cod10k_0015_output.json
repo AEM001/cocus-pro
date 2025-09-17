@@ -1,6 +1,0 @@
-{
-  "instance": "cat",
-  "reason": "目标是一个伪装的cat，位于自然环境中。需要精确分割出其边界。",
-  "original_id": "000149_cat",
-  "source": "COD10K_TEST_DIR"
-}
