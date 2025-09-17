@@ -38,7 +38,7 @@ def _auto_font_and_thickness(base_len: float) -> tuple[float, int]:
     return font_scale, max(2, thickness)
 
 
-def load_sam_model(checkpoint_path: str = "models/sam_vit_b_01ec64.pth", device: str = "cuda"):
+def load_sam_model(checkpoint_path: str = "models/sam_vit_h_4b8939.pth", device: str = "cuda"):
     """加载SAM模型"""
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"SAM模型文件不存在: {checkpoint_path}")
@@ -176,6 +176,49 @@ def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box:
     clipped_mask[y0:y1, x0:x1] = (best_mask[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
 
     return clipped_mask, smart_roi  # 返回扩展后的ROI供下一轮使用
+
+
+def refine_mask_with_points_limited(predictor: SamPredictor, image: np.ndarray, roi_box: ROIBox,
+                                   pos_points: List[Tuple[float, float]],
+                                   neg_points: List[Tuple[float, float]],
+                                   prev_mask: np.ndarray) -> Tuple[np.ndarray, ROIBox]:
+    """使用正负点进行SAM分割优化，严格限制在指定ROI框内
+    
+    返回: (refined_mask, roi_box)
+    """
+    predictor.set_image(image)
+    
+    # 组合所有点和标签
+    all_points = pos_points + neg_points
+    all_labels = [1] * len(pos_points) + [0] * len(neg_points)
+    
+    if not all_points:
+        return prev_mask, roi_box  # 没有点时返回原始掩码和ROI
+    
+    print(f"[SAM限制] 使用扩展ROI框: ({roi_box.x0:.1f}, {roi_box.y0:.1f}, {roi_box.x1:.1f}, {roi_box.y1:.1f})")
+    
+    masks, scores, logits = predictor.predict(
+        point_coords=np.array(all_points),
+        point_labels=np.array(all_labels),
+        box=np.array([roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1]),
+        multimask_output=True,
+    )
+    
+    # 选择最佳掩码
+    best_idx = np.argmax(scores)
+    best_mask = masks[best_idx]
+    
+    # 严格限制在ROI框内进行裁剪
+    H, W = image.shape[:2]
+    x0, y0, x1, y1 = int(roi_box.x0), int(roi_box.y0), int(roi_box.x1), int(roi_box.y1)
+    
+    # 初始化为全零掩码
+    clipped_mask = np.zeros((H, W), dtype=np.uint8)
+    
+    # 只在ROI框内区域应用掩码
+    clipped_mask[y0:y1, x0:x1] = (best_mask[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
+    
+    return clipped_mask, roi_box
 
 
 def _resize_for_vlm(img: np.ndarray, max_side: int) -> np.ndarray:
@@ -321,30 +364,52 @@ def main():
     print("步骤1: 生成初始SAM掩码...")
     current_mask = generate_initial_sam_mask(predictor, image, roi_box)
     save_image(os.path.join(output_dir, 'round0_step1_initial_mask.png'), current_mask)
+    
+    # 扩展ROI框1.1倍用于VLM分析和SAM分割限制
+    from src.sculptor.utils import expand_roi_box
+    img_h, img_w = image.shape[:2]
+    expanded_roi = expand_roi_box(roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1, 1.1, img_w, img_h)
+    print(f"扩展ROI框: ({expanded_roi[0]:.1f}, {expanded_roi[1]:.1f}, {expanded_roi[2]:.1f}, {expanded_roi[3]:.1f})")
 
     # 新流程：基于VLM直接输出正/负点，单轮或多轮迭代
     max_rounds = max(1, int(args.rounds))
     for round_idx in range(max_rounds):
         print(f"\n=== VLM直接点分割 - 第 {round_idx + 1} 轮 ===")
 
-        # 构建上下文图：原图 + 绿色掩码覆盖 + 红色ROI框
-        context = image.copy()
-        mask_overlay = (current_mask > 0).astype(np.uint8)
-        if np.sum(mask_overlay) > 0:
-            green = np.zeros_like(context)
-            green[:, :] = [0, 255, 0]
-            context[mask_overlay > 0] = context[mask_overlay > 0] * 0.7 + green[mask_overlay > 0] * 0.3
-        cv2.rectangle(context, (int(roi_box.x0), int(roi_box.y0)), (int(roi_box.x1), int(roi_box.y1)), (255, 0, 0), 2)
+        # 构建上下文图：原图 + 绿色掩码覆盖 + 红色扩展ROI框
+        from src.sculptor.utils import overlay_mask_on_image
+        context = overlay_mask_on_image(image, current_mask, color=(0, 255, 0), alpha=0.3)
+        cv2.rectangle(context, (int(expanded_roi[0]), int(expanded_roi[1])), (int(expanded_roi[2]), int(expanded_roi[3])), (255, 0, 0), 3)
+        
+        # 保存传递给VLM的上下文图像
+        save_image(os.path.join(output_dir, f'round{round_idx + 1}_context_for_vlm.png'), context)
 
         # 每轮请求固定数量的点：总计 10 个点（优先正点，若存在明显泄漏则包含负点）
 
         # 请求VLM输出点
         print("步骤2: 请求VLM输出正/负点...")
         points_resp = vlm.propose_points(context, instance_name, max_total=10)
-        pos_points = points_resp.get("pos_points", [])
-        neg_points = points_resp.get("neg_points", [])
+        raw_pos_points = points_resp.get("pos_points", [])
+        raw_neg_points = points_resp.get("neg_points", [])
+        
+        # 过滤掉扩展框外的点位
+        def filter_points_in_roi(points, roi):
+            filtered = []
+            for x, y in points:
+                if roi[0] <= x <= roi[2] and roi[1] <= y <= roi[3]:
+                    filtered.append((x, y))
+            return filtered
+        
+        pos_points = filter_points_in_roi(raw_pos_points, expanded_roi)
+        neg_points = filter_points_in_roi(raw_neg_points, expanded_roi)
+        
+        filtered_pos = len(raw_pos_points) - len(pos_points)
+        filtered_neg = len(raw_neg_points) - len(neg_points)
+        if filtered_pos > 0 or filtered_neg > 0:
+            print(f"[过滤] 框外点位: pos={filtered_pos}, neg={filtered_neg}")
+        
         total_pts = len(pos_points) + len(neg_points)
-        print(f"VLM返回点数: pos={len(pos_points)}, neg={len(neg_points)}, total={total_pts}")
+        print(f"VLM返回点数(过滤后): pos={len(pos_points)}, neg={len(neg_points)}, total={total_pts}")
         if total_pts == 0:
             print("[INFO] 本轮未得到任何点，认为已足够或无明显可优化边界，跳过本轮。")
             break
@@ -368,14 +433,16 @@ def main():
                 cv2.circle(vis, (int(x), int(y)), 5, (255, 0, 0), -1)
             save_image(os.path.join(output_dir, f'round{round_idx + 1}_points_overlay.png'), vis)
 
-        # 执行一次SAM精修
+        # 执行一次SAM精修（使用扩展ROI框限制）
         print("步骤3: 使用VLM点进行SAM分割...")
         import torch
         torch.cuda.empty_cache()
-        current_mask, roi_box = refine_mask_with_points(
-            predictor, image, roi_box,
-            pos_points, neg_points, current_mask,
-            square_size
+        
+        # 使用扩展ROI框进行SAM分割限制
+        expanded_roi_box = ROIBox(expanded_roi[0], expanded_roi[1], expanded_roi[2], expanded_roi[3])
+        current_mask, _ = refine_mask_with_points_limited(
+            predictor, image, expanded_roi_box,
+            pos_points, neg_points, current_mask
         )
         print(f"当前掩码像素数: {int(np.sum(current_mask > 0))}")
 

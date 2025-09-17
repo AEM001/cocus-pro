@@ -130,3 +130,32 @@ def uniform_grid_in_box(x0: float, y0: float, x1: float, y1: float, step: float)
     return pts
 
 
+def expand_roi_box(x0: float, y0: float, x1: float, y1: float, scale: float, img_w: int, img_h: int) -> tuple[float, float, float, float]:
+    """扩展ROI框并确保在图像边界内"""
+    # 计算中心点
+    center_x = (x0 + x1) / 2
+    center_y = (y0 + y1) / 2
+    
+    # 计算当前尺寸
+    width = x1 - x0
+    height = y1 - y0
+    
+    # 按比例扩展
+    new_width = width * scale
+    new_height = height * scale
+    
+    # 计算新的边界
+    new_x0 = center_x - new_width / 2
+    new_y0 = center_y - new_height / 2
+    new_x1 = center_x + new_width / 2
+    new_y1 = center_y + new_height / 2
+    
+    # 确保在图像边界内
+    new_x0 = max(0, new_x0)
+    new_y0 = max(0, new_y0)
+    new_x1 = min(img_w - 1, new_x1)
+    new_y1 = min(img_h - 1, new_y1)
+    
+    return new_x0, new_y0, new_x1, new_y1
+
+
