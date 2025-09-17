@@ -1,5 +1,0 @@
-{
-  "instance": "mantis",
-  "reason": "eval-gt-bbox",
-  "method": "eval_gt_bbox"
-}

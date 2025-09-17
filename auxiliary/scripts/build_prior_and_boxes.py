@@ -201,7 +201,7 @@ def main():
         if not args.image:
             args.image = f"../../dataset/COD10K_TEST_DIR/Imgs/{args.name}.jpg"
         if not args.meta:
-            args.meta = f"../out/{args.name}/{args.name}_meta.json"
+            args.meta = f"../../out/{args.name}/{args.name}_meta.json"
         if not args.pred:
             args.pred = f"../llm_out/{args.name}_output.json"
 

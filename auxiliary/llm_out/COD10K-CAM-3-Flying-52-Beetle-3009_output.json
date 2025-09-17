@@ -1,5 +1,0 @@
-{
-  "instance": "beetle",
-  "reason": "eval-gt-bbox",
-  "method": "eval_gt_bbox"
-}

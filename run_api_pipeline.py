@@ -199,10 +199,10 @@ def main():
     print("📦 步骤3: 生成SAM输入")
     print("="*50)
     
-    build_cmd = f"""{python_path} auxiliary/scripts/build_prior_and_boxes.py \\
+    build_cmd = f"""cd auxiliary/scripts && {python_path} build_prior_and_boxes.py \\
         --name {name} \\
-        --meta auxiliary/scripts/out/{name}/{name}_meta.json \\
-        --pred auxiliary/llm_out/{name}_output.json"""
+        --meta ../out/{name}/{name}_meta.json \\
+        --pred ../llm_out/{name}_output.json"""
     
     if not run_command(build_cmd, "生成SAM输入文件"):
         return 1
@@ -239,7 +239,8 @@ def main():
         --name {name} \\
         --rounds {args.rounds} \\
         --ratio {args.ratio} \\
-        --vlm_max_side {args.vlm_max_side}"""
+        --vlm_max_side {args.vlm_max_side} \\
+        --save-points-vis"""
     
     if args.api_key:
         sam_cmd += f" --api-key {args.api_key}"
@@ -257,7 +258,7 @@ def main():
     
     # 验证最终结果
     output_dir = base_dir / "outputs" / "clean_sculpt" / name
-    final_result = output_dir / "final_result.png"
+    final_result = output_dir / "final_mask.png"
     final_vis = output_dir / "final_visualization.png"
     
     if not final_result.exists() or not final_vis.exists():
@@ -268,9 +269,10 @@ def main():
     print("🎉 完整流程执行成功!")
     print("="*50)
     print(f"最终结果:")
-    print(f"  掩码结果: {final_result}")
+    print(f"  最终掩码: {final_result}")
     print(f"  可视化结果: {final_vis}")
     print(f"  完整输出目录: {output_dir}")
+    print(f"  实例信息: {output_dir}/instance_info.txt")
     
     return 0
 

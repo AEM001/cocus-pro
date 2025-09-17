@@ -1,5 +1,0 @@
-{
-  "instance": "grouse",
-  "reason": "eval-gt-bbox",
-  "method": "eval_gt_bbox"
-}

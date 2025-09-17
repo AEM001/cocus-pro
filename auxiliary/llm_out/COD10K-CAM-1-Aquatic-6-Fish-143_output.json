@@ -1,0 +1,19 @@
+{
+  "instance": "camouflaged fish",
+  "ids_line_vertical": [
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "ids_line_horizontal": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "reason": "The object in question is a fish that blends into its surroundings. It is located horizontally across segments 1 to 6 and vertically across segments 3 to 7, as it is partially obscured by the kelp and matches the coloration of the environment."
+}
