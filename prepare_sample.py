@@ -30,8 +30,143 @@ def get_bbox_from_mask(mask_path: str) -> Tuple[float, float, float, float]:
     
     return float(x_min), float(y_min), float(x_max), float(y_max)
 
-def prepare_sample(sample_id: int = 0, dataset_path: str = "/home/albert/code/CV/dataset"):
-    """准备指定ID的样本"""
+def grid_ids_to_bbox(ids_vertical: list, ids_horizontal: list, grid_size: int, img_width: int, img_height: int) -> Tuple[float, float, float, float]:
+    """将网格ID转换为ROI边界框"""
+    if not ids_vertical or not ids_horizontal:
+        raise ValueError("网格ID列表不能为空")
+    
+    # 计算每个网格的尺寸
+    grid_w = img_width / grid_size
+    grid_h = img_height / grid_size
+    
+    # 计算垂直方向的边界
+    min_v = min(ids_vertical)
+    max_v = max(ids_vertical)
+    y0 = (min_v - 1) * grid_h
+    y1 = max_v * grid_h
+    
+    # 计算水平方向的边界 
+    min_h = min(ids_horizontal)
+    max_h = max(ids_horizontal)
+    x0 = (min_h - 1) * grid_w
+    x1 = max_h * grid_w
+    
+    # 添加边界检查
+    x0 = max(0, x0)
+    y0 = max(0, y0)
+    x1 = min(img_width, x1)
+    y1 = min(img_height, y1)
+    
+    return float(x0), float(y0), float(x1), float(y1)
+
+def run_grid_detection(image_path: str, target_description: str, sample_name: str, target_image_path: str = None) -> dict:
+    """运行网格检测并返回结果"""
+    import subprocess
+    import tempfile
+    
+    base_dir = "/home/albert/code/CV"
+    auxiliary_dir = os.path.join(base_dir, "auxiliary")
+    
+    # 创建必要的目录
+    out_dir = os.path.join(auxiliary_dir, "out", sample_name)
+    llm_out_dir = os.path.join(auxiliary_dir, "llm_out")
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(llm_out_dir, exist_ok=True)
+    
+    try:
+        # 第1步：生成网格图像
+        print("生成网格图像...")
+        make_regions_script = os.path.join(auxiliary_dir, "scripts", "make_region_prompts.py")
+        if not os.path.exists(make_regions_script):
+            # 如果脚本不存在，使用简化的网格生成
+            generate_simple_grid_images(image_path, out_dir, sample_name)
+        else:
+            # 使用传入的target_image_path，如果没有则使用image_path
+            img_path = target_image_path if target_image_path else image_path
+            subprocess.run([
+                "python", make_regions_script,
+                "--image", img_path,
+                "--name", sample_name,
+                "--rows", "9",
+                "--cols", "9",
+                "--outdir", os.path.join(auxiliary_dir, "out")
+            ], cwd=base_dir, check=True, capture_output=True, text=True)
+        
+        # 第2步：调用VLM API进行网格定位
+        print("调用VLM进行网格定位...")
+        detect_api_script = os.path.join(auxiliary_dir, "scripts", "detect_target_api.py")
+        result = subprocess.run([
+            "python", detect_api_script,
+            "--name", sample_name,
+            "--target", target_description,
+            "--grid-size", "9"
+        ], cwd=base_dir, check=True, capture_output=True, text=True)
+        
+        # 读取VLM检测结果
+        output_path = os.path.join(llm_out_dir, f"{sample_name}_output.json")
+        with open(output_path, 'r', encoding='utf-8') as f:
+            detection_result = json.load(f)
+        
+        print(f"VLM检测结果: {detection_result}")
+        return detection_result
+        
+    except subprocess.CalledProcessError as e:
+        print(f"网格检测失败: {e}")
+        print(f"stdout: {e.stdout}")
+        print(f"stderr: {e.stderr}")
+        raise
+    except Exception as e:
+        print(f"网格检测异常: {e}")
+        raise
+
+def generate_simple_grid_images(image_path: str, out_dir: str, sample_name: str, grid_size: int = 9):
+    """生成简单的网格图像（如果make_region_prompts.py不存在）"""
+    import cv2
+    import numpy as np
+    
+    # 读取图像
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"无法读取图像: {image_path}")
+    
+    h, w = img.shape[:2]
+    
+    # 生成垂直网格图
+    vertical_img = img.copy()
+    for i in range(1, grid_size):
+        x = int(i * w / grid_size)
+        cv2.line(vertical_img, (x, 0), (x, h), (255, 255, 255), 2)
+    
+    # 添加数字标签
+    for i in range(grid_size):
+        x_center = int((i + 0.5) * w / grid_size)
+        cv2.putText(vertical_img, str(i + 1), (x_center - 10, 50), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    
+    # 生成水平网格图
+    horizontal_img = img.copy()
+    for i in range(1, grid_size):
+        y = int(i * h / grid_size)
+        cv2.line(horizontal_img, (0, y), (w, y), (255, 255, 255), 2)
+    
+    # 添加数字标签
+    for i in range(grid_size):
+        y_center = int((i + 0.5) * h / grid_size)
+        cv2.putText(horizontal_img, str(i + 1), (30, y_center + 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    
+    # 保存网格图像
+    cv2.imwrite(os.path.join(out_dir, f"{sample_name}_vertical_9.png"), vertical_img)
+    cv2.imwrite(os.path.join(out_dir, f"{sample_name}_horizontal_9.png"), horizontal_img)
+
+def prepare_sample(sample_id: int = 0, dataset_path: str = "/home/albert/code/CV/dataset", use_vlm: bool = True):
+    """准备指定ID的样本
+    
+    Args:
+        sample_id: 样本ID
+        dataset_path: 数据集路径
+        use_vlm: 是否使用VLM进行网格定位（默认True），False则使用GT掩码
+    """
     
     # 读取样本信息
     sample_info_path = os.path.join(dataset_path, "sample_info.json")
@@ -57,26 +192,13 @@ def prepare_sample(sample_id: int = 0, dataset_path: str = "/home/albert/code/CV
     if not os.path.exists(mask_path):
         raise FileNotFoundError(f"掩码文件不存在: {mask_path}")
     
-    # 从掩码计算ROI框
-    x0, y0, x1, y1 = get_bbox_from_mask(mask_path)
-    
-    # 添加一些padding到边界框
-    img = cv2.imread(image_path)
-    h, w = img.shape[:2]
-    
-    padding = 20  # 像素
-    x0 = max(0, x0 - padding)
-    y0 = max(0, y0 - padding)
-    x1 = min(w, x1 + padding)
-    y1 = min(h, y1 + padding)
-    
-    roi_box = {
-        "boxes": [[x0, y0, x1, y1]]
-    }
-    
     # 创建样本名称（用于SAM Sculpt）
     image_filename = os.path.basename(sample['image']).split('.')[0]
     sample_name = f"cod10k_{sample_id:04d}"
+    
+    # 读取图像尺寸
+    img = cv2.imread(image_path)
+    h, w = img.shape[:2]
     
     # 创建输出目录
     base_dir = "/home/albert/code/CV"
@@ -91,24 +213,89 @@ def prepare_sample(sample_id: int = 0, dataset_path: str = "/home/albert/code/CV
     os.makedirs(box_out_dir, exist_ok=True)
     os.makedirs(llm_out_dir, exist_ok=True)
     
-    # 创建符号链接而不是复制文件（节省空间）
+    # 创建符号链接（必须在网格生成前创建，因为脚本会寻找这个文件）
     target_image_path = os.path.join(images_dir, f"{sample_name}.png")
     if os.path.exists(target_image_path) or os.path.islink(target_image_path):
         os.unlink(target_image_path)
     os.symlink(image_path, target_image_path)
+    
+    if use_vlm:
+        print("使用VLM网格定位生成ROI...")
+        try:
+            # 构建目标描述
+            target_description = f"find the camouflaged {sample['base_class']}"
+            
+            # 运行网格检测
+            detection_result = run_grid_detection(image_path, target_description, sample_name, target_image_path)
+            
+            # 检查检测结果
+            if not detection_result.get('ids_line_vertical') or not detection_result.get('ids_line_horizontal'):
+                print(f"VLM未检测到目标，回退到GT掩码方法")
+                x0, y0, x1, y1 = get_bbox_from_mask(mask_path)
+                vlm_detection_result = {
+                    "instance": sample['base_class'],
+                    "reason": "VLM检测失败，使用GT掩码作为备用",
+                    "method": "fallback_gt_mask"
+                }
+            else:
+                # 将网格ID转换为ROI框
+                x0, y0, x1, y1 = grid_ids_to_bbox(
+                    detection_result['ids_line_vertical'],
+                    detection_result['ids_line_horizontal'],
+                    9, w, h
+                )
+                vlm_detection_result = {
+                    "instance": detection_result['instance'],
+                    "reason": detection_result['reason'],
+                    "ids_line_vertical": detection_result['ids_line_vertical'],
+                    "ids_line_horizontal": detection_result['ids_line_horizontal'],
+                    "method": "vlm_grid_detection"
+                }
+                print(f"VLM定位成功: 垂直网格{detection_result['ids_line_vertical']}, 水平网格{detection_result['ids_line_horizontal']}")
+                
+        except Exception as e:
+            print(f"VLM检测失败: {e}，回退到GT掩码方法")
+            x0, y0, x1, y1 = get_bbox_from_mask(mask_path)
+            vlm_detection_result = {
+                "instance": sample['base_class'],
+                "reason": f"VLM检测异常: {str(e)}",
+                "method": "fallback_gt_mask"
+            }
+    else:
+        print("使用GT掩码计算ROI...")
+        # 从掩码计算ROI框
+        x0, y0, x1, y1 = get_bbox_from_mask(mask_path)
+        vlm_detection_result = {
+            "instance": sample['base_class'],
+            "reason": "直接使用GT掩码计算ROI",
+            "method": "gt_mask"
+        }
+    
+    # 添加一些padding到边界框
+    padding = 20  # 像素
+    x0 = max(0, x0 - padding)
+    y0 = max(0, y0 - padding)
+    x1 = min(w, x1 + padding)
+    y1 = min(h, y1 + padding)
+    
+    roi_box = {
+        "boxes": [[x0, y0, x1, y1]]
+    }
     
     # 保存ROI框信息
     roi_json_path = os.path.join(box_out_dir, f"{sample_name}_sam_boxes.json")
     with open(roi_json_path, 'w') as f:
         json.dump(roi_box, f, indent=2)
     
-    # 创建语义信息文件
-    llm_info = {
-        "instance": sample['base_class'],
-        "reason": f"目标是一个伪装的{sample['base_class']}，位于自然环境中。需要精确分割出其边界。",
+    # 创建语义信息文件，包含VLM检测结果
+    llm_info = vlm_detection_result.copy()
+    llm_info.update({
         "original_id": sample['unique_id'],
-        "source": "COD10K_TEST_DIR"
-    }
+        "source": "COD10K_TEST_DIR",
+        "sample_id": sample_id,
+        "image_size": [w, h],
+        "roi_box": [x0, y0, x1, y1]
+    })
     
     llm_out_path = os.path.join(llm_out_dir, f"{sample_name}_output.json")
     with open(llm_out_path, 'w', encoding='utf-8') as f:
@@ -129,6 +316,7 @@ def main():
     parser.add_argument('--id', type=int, default=0, help='样本ID (默认: 0)')
     parser.add_argument('--dataset', default='/home/albert/code/CV/dataset', help='数据集根目录')
     parser.add_argument('--list', action='store_true', help='列出前10个样本')
+    parser.add_argument('--no-vlm', action='store_true', help='不使用VLM，直接用GT掩码计算ROI')
     
     args = parser.parse_args()
     
@@ -145,7 +333,7 @@ def main():
         return
     
     try:
-        sample_name, sample = prepare_sample(args.id, args.dataset)
+        sample_name, sample = prepare_sample(args.id, args.dataset, use_vlm=not args.no_vlm)
         print(f"\n✅ 样本准备完成！")
         print(f"现在可以运行: python clean_sam_sculpt.py --name {sample_name}")
         

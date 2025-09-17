@@ -86,31 +86,25 @@ def save_image(path: str, img: np.ndarray):
 
 
 def generate_initial_sam_mask(predictor: SamPredictor, image: np.ndarray, roi_box: ROIBox) -> np.ndarray:
-    """步骤1: 使用SAM生成初始掩码 (使用ROI框中心点)"""
+    """步骤1: 使用SAM生成初始掩码 (仅使用ROI框约束)"""
     predictor.set_image(image)
 
-    # 使用ROI框中心点
-    center_x = (roi_box.x0 + roi_box.x1) / 2
-    center_y = (roi_box.y0 + roi_box.y1) / 2
-
+    # 仅使用ROI框作为约束，不使用点提示
     masks, scores, logits = predictor.predict(
-        point_coords=np.array([[center_x, center_y]]),
-        point_labels=np.array([1]),
         box=np.array([roi_box.x0, roi_box.y0, roi_box.x1, roi_box.y1]),
-        multimask_output=True,
+        multimask_output=False,  # 仅生成单个掩码
     )
 
-    # 选择最佳掩码
-    best_idx = np.argmax(scores)
-    best_mask = masks[best_idx]
+    # 直接使用返回的掩码（因为multimask_output=False，只返回一个掩码）
+    mask = masks[0]
 
     # 裁剪到ROI区域
     H, W = image.shape[:2]
     x0, y0, x1, y1 = int(roi_box.x0), int(roi_box.y0), int(roi_box.x1), int(roi_box.y1)
     clipped_mask = np.zeros((H, W), dtype=np.uint8)
-    clipped_mask[y0:y1, x0:x1] = (best_mask[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
+    clipped_mask[y0:y1, x0:x1] = (mask[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
 
-    print(f"初始SAM掩码生成完成，像素数: {np.sum(clipped_mask > 0)}")
+    print(f"初始SAM掩码生成完成（仅ROI框约束），像素数: {np.sum(clipped_mask > 0)}")
     return clipped_mask
 
 
@@ -487,12 +481,8 @@ def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box:
                           pos_points: List[Tuple[float, float]],
                           neg_points: List[Tuple[float, float]],
                           prev_mask: np.ndarray,
-                          square_size: float = 0.0,
-                          allowed_update_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, ROIBox]:
-    """步骤4: 使用正负点进行SAM分割优化，支持智能BBox扩展与局部更新门控
-    
-    Args:
-        allowed_update_mask: 允许更新的区域（H×W二值）。如果提供，只有该区域内使用新掩码覆盖，其他位置保持前一轮结果。
+                          square_size: float = 0.0) -> Tuple[np.ndarray, ROIBox]:
+    """步骤4: 使用正负点进行SAM分割优化，支持智能BBox扩展
     
     返回: (refined_mask, updated_roi_box)
     """
@@ -532,13 +522,6 @@ def refine_mask_with_points(predictor: SamPredictor, image: np.ndarray, roi_box:
     x0, y0, x1, y1 = int(smart_roi.x0), int(smart_roi.y0), int(smart_roi.x1), int(smart_roi.y1)
     clipped_mask = np.zeros((H, W), dtype=np.uint8)
     clipped_mask[y0:y1, x0:x1] = (best_mask[y0:y1, x0:x1] > 0).astype(np.uint8) * 255
-
-    # 应用局部更新门控：仅在允许区域内更新，其它区域保持不变
-    if allowed_update_mask is not None:
-        gate = (allowed_update_mask > 0).astype(np.uint8)
-        final_mask = prev_mask.copy()
-        final_mask[gate.astype(bool)] = clipped_mask[gate.astype(bool)]
-        return final_mask, smart_roi
 
     return clipped_mask, smart_roi  # 返回扩展后的ROI供下一轮使用
 
@@ -765,33 +748,11 @@ def main():
         roi_height = roi_box.y1 - roi_box.y0
         square_size = max(float(effective_min_square_px), float(round_ratio) * float(min(roi_width, roi_height)))
         
-        # 步骤4: 使用收集的点进行sam分割（支持智能BBox扩展 + 局部更新门控）
+        # 步骤4: 使用收集的点进行sam分割（支持智能BBox扩展）
         if all_pos_points or all_neg_points:
             print(f"步骤4: 使用 {len(all_pos_points)} 个正点和 {len(all_neg_points)} 个负点进行分割...")
             print(f"[参数] 小正方形尺寸: {square_size:.1f} px （用于智能扩展BBox）")
             
-            # 构建严格的局部更新门控掩码（仅允许被选中锚点周围的小范围更新）
-            H, W = image.shape[:2]
-            allowed_update_mask = np.zeros((H, W), dtype=np.uint8)
-            
-            # 对每个被选中的锚点，创建更小的圆形更新区域
-            anchor_radius = int(max(20, min(60, square_size * 1.1)))  # 比原来的正方形要小得多
-            
-            for anchor_info in selected_anchors:
-                anchor_id = int(anchor_info.get('id', 0))
-                if 1 <= anchor_id <= 8:
-                    # 使用当前轮次开始时固定的锚点位置
-                    anchor_x, anchor_y = current_anchor_points[anchor_id - 1]
-                    
-                    # 创建以锚点为中心的圆形更新区域
-                    cy, cx = np.ogrid[:H, :W]
-                    dist_from_anchor = np.sqrt((cx - anchor_x)**2 + (cy - anchor_y)**2)
-                    circle_mask = dist_from_anchor <= anchor_radius
-                    allowed_update_mask[circle_mask] = 1
-                    
-            updated_area = int(allowed_update_mask.sum())
-            print(f"[严格门控] 本轮仅允许被选中锚点周围 {anchor_radius}px 半径内更新，共 {updated_area} 像素")
-
             # 清理GPU缓存以释放内存
             import torch
             torch.cuda.empty_cache()
@@ -799,8 +760,7 @@ def main():
             old_mask = (current_mask > 0).astype(np.uint8)
             current_mask, updated_roi_box = refine_mask_with_points(
                 predictor, image, roi_box,
-                all_pos_points, all_neg_points, current_mask, square_size,
-                allowed_update_mask=allowed_update_mask,
+                all_pos_points, all_neg_points, current_mask, square_size
             )
             # 记录本轮掩码变化像素数
             new_mask_bin = (current_mask > 0).astype(np.uint8)

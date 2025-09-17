@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a VLM-driven SAM segmentation sculpting system that combines Segment Anything Model (SAM) with Vision-Language Models for iterative mask refinement. The system uses anchor points and quadrant-based analysis to progressively improve image segmentation results.
+This is a VLM-driven SAM segmentation sculpting system that combines Segment Anything Model (SAM) with Vision-Language Models for iterative mask refinement. The system uses anchor points and quadrant-based analysis to progressively improve image segmentation results, particularly for camouflaged object detection and segmentation.
 
 ## Environment Setup
 
@@ -15,88 +15,199 @@ conda activate camo-vlm
 # Set environment variables for stability
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# For API usage (recommended)
+export DASHSCOPE_API_KEY="your-api-key"
 ```
 
 ## Running the System
 
-### Main Script
-```bash
-# Basic run with default settings
-python refactor_sam_sculpt.py
+### Current Main Scripts
 
-# Full command with all parameters
-python refactor_sam_sculpt.py --name f --qwen_dir /home/albert/code/CV/models/Qwen2.5-VL-3B-Instruct --ratio 1.0 --anchors_per_round 1 --vlm_max_side 720 --rounds 5
+#### 1. Single Image Processing
+```bash
+# Basic run with API (recommended)
+python clean_sam_sculpt.py --name f --use-api --clean-output
+
+# Using local models
+python clean_sam_sculpt.py --name f --qwen_dir /home/albert/code/CV/models/Qwen2.5-VL-3B-Instruct
+
+# With custom parameters
+python clean_sam_sculpt.py --name f --use-api --ratio 0.6 --rounds 1 --vlm-max-side 720
 ```
 
-### Quick Testing Commands
+#### 2. Batch Processing
 ```bash
-# Test Qwen VLM integration
-python test_qwen.py
+# Process specific samples
+python batch_process.py --samples f,dog,cat --use-api
 
-# Verify model setup
-python setup_qwen_model.py
+# Auto-discover and process all images
+python batch_process.py --auto --use-api --parallel 4
+```
+
+#### 3. Full API Pipeline (Detection + Sculpting)
+```bash
+# Complete pipeline from scratch
+python run_api_pipeline.py --name f --target "find the camouflaged scorpionfish"
+
+# Only run target detection
+python run_api_pipeline.py --name f --only-detection --high-resolution
 ```
 
 ## Code Architecture
 
 ### Core Components
 
-1. **Main Pipeline** (`refactor_sam_sculpt.py`): Orchestrates the entire segmentation sculpting process
+1. **Main Pipelines**:
+   - `clean_sam_sculpt.py`: Single image SAM sculpting with VLM guidance
+   - `batch_process.py`: Batch processing with parallel execution
+   - `run_api_pipeline.py`: Complete pipeline from detection to sculpting
+
 2. **VLM Integration** (`src/sculptor/vlm/`): Vision-Language Model backends
-   - `base.py`: Abstract VLM interface
-   - `qwen.py`: Qwen2.5-VL implementation with local inference
+   - `base.py`: Abstract VLM interface with JSON parsing utilities
+   - `qwen.py`: Local Qwen2.5-VL implementation
+   - `qwen_api.py`: Alibaba Cloud Qwen VL API integration (DashScope & OpenAI-compatible)
+   - `mock.py`: Testing fallback backend
    - `prompts.py`: Prompt engineering for anchor/quadrant analysis
-3. **SAM Integration** (`src/sculptor/sam_*.py`): Segment Anything Model integration
+
+3. **SAM Integration** (`src/sculptor/`): Segment Anything Model integration
    - `sam_backends.py`: SAM predictor adapter
    - `sam_refine.py`: Iterative mask refinement engine
-4. **Utilities** (`src/sculptor/utils.py`, `src/sculptor/types.py`): Support functions and type definitions
+   - `utils.py`, `types.py`: Support functions and type definitions
 
-### Data Flow
+4. **Support Scripts**:
+   - `install_api_deps.py`: Automatic dependency installation
+   - `prepare_sample.py`: Sample data preparation
+   - `clean_dataset.py`: Dataset cleanup utilities
+   - `debug_anchor_consistency.py`: Debugging tools
 
-1. **Image Input**: Load image and initial ROI boxes from `auxiliary/` directory
-2. **Anchor Selection**: VLM analyzes image and selects anchor points for refinement
-3. **Quadrant Analysis**: For each anchor, VLM analyzes quadrant crops and provides edit recommendations
-4. **SAM Refinement**: Apply positive/negative points to SAM for mask refinement
-5. **Visualization**: Generate outputs in `outputs/refactor_sculpt/[sample_name]/`
+### Current Workflow (Simplified Single-Round Strategy)
 
-### VLM Integration Architecture
+1. **Input Preparation**: Load image and ROI boxes from `auxiliary/` directory
+2. **Initial SAM Segmentation**: Generate baseline mask using ROI
+3. **Anchor Generation**: Create 8 boundary anchor points for analysis
+4. **VLM Anchor Selection**: Analyze anchors and select those needing refinement
+5. **Batch Quadrant Analysis**: For each selected anchor, analyze quadrant regions
+6. **Point Collection**: Gather all positive/negative edit points
+7. **Final SAM Refinement**: Apply all points in single batch operation
+8. **Output Generation**: Save final mask and instance info to `outputs/clean_sculpt/[name]/`
+
+### VLM Backend Architecture
 
 The system supports multiple VLM backends through the `VLMBase` interface:
-- **Local Inference**: Qwen2.5-VL with AWQ quantization (implemented)
-- **Server Mode**: HTTP endpoint integration (stub)
-- **Mock Mode**: Testing fallback
+- **API Mode** (Recommended): Alibaba Cloud Qwen VL via DashScope or OpenAI-compatible endpoints
+- **Local Inference**: Qwen2.5-VL-3B-Instruct with local CUDA acceleration
+- **Mock Mode**: Testing fallback with simulated responses
 
 ## Configuration
 
-### Sample Selection
-Edit line 259 in `refactor_sam_sculpt.py`:
-```python
-sample_name = "f"  # Change to "dog" or "q"
+### Available Samples
+Current test samples in `auxiliary/images/`:
+- `f`: Camouflaged scorpionfish
+- `dog`: Camouflaged dog
+- `cat`: Camouflaged cat
+- `q`: Camouflaged animal (generic)
+- `person2`: Camouflaged person
+- `cod10k_0000`, `cod10k_0015`: COD10K dataset samples
+
+### Key Parameters
+
+#### Core Processing Parameters
+```bash
+# Number of refinement rounds (default: 1 for current batch strategy)
+--rounds 1
+
+# Quadrant analysis region ratio (default: 0.6)
+--ratio 0.6
+
+# VLM input resolution (default: 720)
+--vlm-max-side 720
+
+# Output format and cleanup
+--output-format png
+--clean-output  # Keep only final results
 ```
 
-### Quadrant Box Size
-Edit line 155 in `refactor_sam_sculpt.py` (in `create_quadrant_visualization` function):
-```python
-ratio: float = 0.35  # Increase to 0.5 or 0.6 for larger quadrant boxes
+#### API Configuration
+```bash
+# Use Alibaba Cloud API (recommended)
+--use-api
+
+# Use OpenAI-compatible API mode
+--use-openai-api
+
+# High resolution mode for API
+--high-resolution
+
+# Custom API model
+--api-model qwen-vl-plus-latest
+```
+
+#### Local Model Configuration
+```bash
+# Local Qwen model directory
+--qwen_dir /path/to/models/Qwen2.5-VL-3B-Instruct
+
+# SAM model checkpoint
+--sam_checkpoint models/sam_vit_b_01ec64.pth
 ```
 
 ## Model Dependencies
 
 ### Required Models
-- SAM checkpoint: `models/sam_vit_b_01ec64.pth` (or other SAM variants)
-- Qwen2.5-VL model: `models/Qwen2.5-VL-7B-Instruct-AWQ/` or `models/Qwen2.5-VL-3B-Instruct/`
+- **SAM checkpoint**: `models/sam_vit_b_01ec64.pth` (or other SAM variants like vit_h, vit_l)
+- **Local Qwen models** (if not using API):
+  - `models/Qwen2.5-VL-3B-Instruct/` (recommended for local inference)
+  - `models/Qwen2.5-VL-7B-Instruct-AWQ/` (higher quality, more VRAM)
 
 ### Hardware Requirements
-- GPU with 7-8GB memory for Qwen2.5-VL-7B-Instruct-AWQ
-- CUDA support recommended for performance
-- CPU fallback available but significantly slower
+- **API Mode**: Minimal local requirements, only SAM model needed
+- **Local Mode**:
+  - GPU with 6-8GB VRAM for Qwen2.5-VL-3B
+  - GPU with 12-16GB VRAM for Qwen2.5-VL-7B
+  - CUDA support recommended for performance
+  - CPU fallback available but significantly slower
 
-## Output Structure
+## Input/Output Structure
 
-Results are saved in `outputs/refactor_sculpt/[sample_name]/`:
-- Step-by-step visualization images
-- Final refined masks
-- Intermediate processing results
+### Input Files Structure
+```
+auxiliary/
+├── images/
+│   ├── f.png              # Source images
+│   ├── dog.png
+│   └── ...
+├── out/                   # Grid detection metadata
+│   ├── f/
+│   │   └── f_meta.json    # Grid layout info
+│   └── ...
+├── llm_out/               # Semantic annotations (optional)
+│   ├── f_output.json      # Instance descriptions
+│   └── ...
+└── box_out/               # ROI detection results
+    ├── f/
+    │   └── f_sam_boxes.json  # Bounding boxes
+    └── ...
+```
+
+### ROI Box Format
+```json
+{
+  "x0": 100.5, "y0": 150.2,
+  "x1": 400.8, "y1": 350.9
+}
+```
+
+### Output Structure
+Results saved in `outputs/clean_sculpt/[sample_name]/`:
+```
+outputs/clean_sculpt/f/
+├── final_mask.png         # Final segmentation mask
+├── instance_info.txt      # Instance name/description
+├── anchors_visualization.png  # Anchor points overlay
+├── quadrant_*.png         # Quadrant analysis images (if not --clean-output)
+└── step_*.png            # Intermediate visualizations (if not --clean-output)
+```
 
 ## Key Technical Notes
 

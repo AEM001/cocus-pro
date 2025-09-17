@@ -3,6 +3,7 @@ checkpoints/
 models/
 outputs/
 dataset/
+models/
 # 忽略Python缓存文件
 __pycache__/
 *.pyc
