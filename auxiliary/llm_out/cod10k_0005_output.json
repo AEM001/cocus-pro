@@ -1,0 +1,28 @@
+{
+  "instance": "camouflaged katydid",
+  "reason": "The object in question is a camouflaged katydid, which is centrally located in the image. It blends with the surrounding moss and vegetation, making it difficult to spot. The vertical segmentation lines 4, 5, and 6, as well as the horizontal lines 3, 4, and 5, all contain parts of this insect.",
+  "ids_line_vertical": [
+    4,
+    5,
+    6
+  ],
+  "ids_line_horizontal": [
+    3,
+    4,
+    5
+  ],
+  "method": "vlm_grid_detection",
+  "original_id": "000039_katydid",
+  "source": "COD10K_TEST_DIR",
+  "sample_id": 5,
+  "image_size": [
+    1024,
+    769
+  ],
+  "roi_box": [
+    207.55555555555554,
+    236.33333333333331,
+    588.8888888888889,
+    532.6666666666666
+  ]
+}

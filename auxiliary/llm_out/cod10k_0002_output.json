@@ -1,0 +1,32 @@
+{
+  "instance": "camouflaged pipefish",
+  "reason": "The object is a long, slender fish with a tubular body and elongated snout, consistent with a pipefish. It is well-camouflaged against the rocky, textured background, blending in with the colors and patterns of the surrounding environment.",
+  "ids_line_vertical": [
+    4,
+    5,
+    6
+  ],
+  "ids_line_horizontal": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "method": "vlm_grid_detection",
+  "original_id": "000019_pipefish",
+  "source": "COD10K_TEST_DIR",
+  "sample_id": 2,
+  "image_size": [
+    683,
+    1024
+  ],
+  "roi_box": [
+    0,
+    321.3333333333333,
+    551.2222222222222,
+    702.6666666666666
+  ]
+}

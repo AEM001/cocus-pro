@@ -260,13 +260,3 @@ python eval_ovcos.py --gt_dir ./gt_masks --pred_dir ./pred_masks \
 * Python 实现工具（与官方 MATLAB 评测一致对齐）：**PySODMetrics / PySODEvalToolkit**。([GitHub][4])
 
 ---
-
-如果你把两份 `*.json` 类别文件（或一个类别 txt/tsv）也准备好，我可以把脚本里**类均值（Macro）**、**Top-1/Top-5 分类准确率**以及**分错误样本清单**一起补上，方便你完整复现实验表格。
-
-[1]: https://yun-liu.github.io/papers/%28ICCV%272017%29Structure-measure%20-%20A%20New%20Way%20to%20Evaluate%20Foreground%20Maps.pdf?utm_source=chatgpt.com "Structure-measure: A New Way to Evaluate Foreground Maps"
-[2]: https://arxiv.org/pdf/1805.10421?utm_source=chatgpt.com "Enhanced-alignment Measure for Binary Foreground Map ..."
-[3]: https://openaccess.thecvf.com/content_cvpr_2014/papers/Margolin_How_to_Evaluate_2014_CVPR_paper.pdf?utm_source=chatgpt.com "How to Evaluate Foreground Maps?"
-[4]: https://github.com/lartpang/PySODMetrics "GitHub - lartpang/PySODMetrics: PySODMetrics: A Simple and Efficient Implementation of Grayscale/Binary Segmentation Metrcis"
-[5]: https://github.com/lartpang/PySODEvalToolkit "GitHub - lartpang/PySODEvalToolkit: PySODEvalToolkit: A Python-based Evaluation Toolbox for Salient Object Detection and Camouflaged Object Detection"
-[6]: https://arxiv.org/html/2506.19300v1 "Open-Vocabulary Camouflaged Object Segmentation with Cascaded Vision Language Models"
-[7]: https://www.evidentlyai.com/classification-metrics/multi-class-metrics?utm_source=chatgpt.com "Accuracy, precision, and recall in multi-class classification"

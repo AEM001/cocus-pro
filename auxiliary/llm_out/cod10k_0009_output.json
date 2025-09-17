@@ -1,0 +1,28 @@
+{
+  "instance": "camouflaged mantis",
+  "reason": "The mantis is small and blends with the surrounding gravel, but its distinct shape and position in the center of the image make it identifiable within the specified segments.",
+  "ids_line_vertical": [
+    3,
+    4,
+    5
+  ],
+  "ids_line_horizontal": [
+    4,
+    5,
+    6
+  ],
+  "method": "vlm_grid_detection",
+  "original_id": "000073_mantis",
+  "source": "COD10K_TEST_DIR",
+  "sample_id": 9,
+  "image_size": [
+    1024,
+    684
+  ],
+  "roi_box": [
+    321.3333333333333,
+    132.0,
+    702.6666666666666,
+    400.0
+  ]
+}

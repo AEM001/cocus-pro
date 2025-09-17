@@ -1,0 +1,33 @@
+{
+  "instance": "camouflaged katydid",
+  "reason": "The object in question is a camouflaged katydid, which is visible on the tree branch. It blends with the leaf-like structure of the branch, and its body spans across segments 1 to 5 vertically and 1 to 6 horizontally.",
+  "ids_line_vertical": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "ids_line_horizontal": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "method": "vlm_grid_detection",
+  "original_id": "000031_katydid",
+  "source": "COD10K_TEST_DIR",
+  "sample_id": 4,
+  "image_size": [
+    1023,
+    653
+  ],
+  "roi_box": [
+    0,
+    0,
+    702.0,
+    382.77777777777777
+  ]
+}

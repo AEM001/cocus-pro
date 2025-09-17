@@ -1,0 +1,5 @@
+{
+  "instance": "worm",
+  "reason": "eval-gt-bbox",
+  "method": "eval_gt_bbox"
+}

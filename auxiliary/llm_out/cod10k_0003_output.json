@@ -1,0 +1,28 @@
+{
+  "instance": "dog",
+  "reason": "The dog is located in the lower right portion of the image, visible in segments 6-8 vertically and 7-9 horizontally. Its brown and black fur blends with the dry grass, making it camouflaged.",
+  "ids_line_vertical": [
+    6,
+    7,
+    8
+  ],
+  "ids_line_horizontal": [
+    7,
+    8,
+    9
+  ],
+  "method": "vlm_grid_detection",
+  "original_id": "000030_dog",
+  "source": "COD10K_TEST_DIR",
+  "sample_id": 3,
+  "image_size": [
+    3688,
+    2116
+  ],
+  "roi_box": [
+    2438.6666666666665,
+    1155.5555555555557,
+    3688,
+    1900.888888888889
+  ]
+}
