@@ -1,0 +1,75 @@
+{
+  "timestamp": "2025-09-17T11:13:17.866132",
+  "summary": {
+    "total_images": 4,
+    "successful": 3,
+    "failed": 1,
+    "success_rate": 75.0,
+    "total_processing_time": 43.897372245788574,
+    "average_processing_time": 10.974343061447144
+  },
+  "results": [
+    {
+      "name": "cat",
+      "image_path": "auxiliary/images/cat.png",
+      "success": false,
+      "error": "目标检测失败: 命令失败: Command 'export DASHSCOPE_API_KEY='sk-a20473de00b94f668cbcd4d2725947b2' && cd auxiliary/scripts && /home/albert/anaconda3/envs/camo-vlm/bin/python detect_target_api.py \\\n                --name cat \\\n                --target \"find the camouflaged cat\" \\\n                --model qwen-vl-plus-latest \\\n                --grid-size 9' returned non-zero exit status 1.\n输出: [ERROR] 网格图像文件不存在:\n  垂直: /home/albert/code/CV/auxiliary/out/cat/cat_vertical_9.png\n  水平: /home/albert/code/CV/auxiliary/out/cat/cat_horizontal_9.png\n请先运行 make_region_prompts.py 生成网格图像\n\n错误: ",
+      "steps_completed": [
+        "grid_generation"
+      ],
+      "processing_time": 0,
+      "output_files": []
+    },
+    {
+      "name": "dog",
+      "image_path": "auxiliary/images/dog.png",
+      "success": true,
+      "error": null,
+      "steps_completed": [
+        "grid_generation",
+        "target_detection",
+        "sam_input_generation",
+        "sam_sculpting"
+      ],
+      "processing_time": 16.8218035697937,
+      "output_files": [
+        "instance_info.txt",
+        "final_mask.png"
+      ]
+    },
+    {
+      "name": "f",
+      "image_path": "auxiliary/images/f.png",
+      "success": true,
+      "error": null,
+      "steps_completed": [
+        "grid_generation",
+        "target_detection",
+        "sam_input_generation",
+        "sam_sculpting"
+      ],
+      "processing_time": 12.540909051895142,
+      "output_files": [
+        "final_mask.png",
+        "instance_info.txt"
+      ]
+    },
+    {
+      "name": "q",
+      "image_path": "auxiliary/images/q.png",
+      "success": true,
+      "error": null,
+      "steps_completed": [
+        "grid_generation",
+        "target_detection",
+        "sam_input_generation",
+        "sam_sculpting"
+      ],
+      "processing_time": 14.534659624099731,
+      "output_files": [
+        "instance_info.txt",
+        "final_mask.png"
+      ]
+    }
+  ]
+}

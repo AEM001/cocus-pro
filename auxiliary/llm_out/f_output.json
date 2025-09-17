@@ -3,12 +3,14 @@
   "ids_line_vertical": [
     4,
     5,
-    6
+    6,
+    7
   ],
   "ids_line_horizontal": [
     5,
     6,
-    7
+    7,
+    8
   ],
-  "reason": "The scorpionfish is camouflaged against the sandy seabed. It is located in the central portion of the image, visible across segments 4-6 vertically and 5-7 horizontally, blending with the surrounding sand and rocks."
+  "reason": "The scorpionfish is camouflaged against the sandy seabed. It is located in the central portion of the image, spanning vertically across segments 4 to 7 and horizontally across segments 5 to 8, blending with the surrounding sand and rocks."
 }

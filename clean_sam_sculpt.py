@@ -560,10 +560,10 @@ def main():
     ap = argparse.ArgumentParser(description='SAM+Qwen refinement with single-anchor optimization')
     ap.add_argument('--name', default='f', help='sample name (e.g., f, dog, q)')
     ap.add_argument('--qwen_dir', default='/home/albert/code/CV/models/Qwen2.5-VL-3B-Instruct', help='Qwen2.5-VL model dir (3B recommended)')
-    ap.add_argument('--rounds', type=int, default=4, help='refinement rounds')
-    ap.add_argument('--ratio', type=float, default=0.8, help='square ratio to ROI short side for tangent square crop')
+    ap.add_argument('--rounds', type=int, default=1, help='refinement rounds')
+    ap.add_argument('--ratio', type=float, default=0.6, help='square ratio to ROI short side for tangent square crop')
     ap.add_argument('--vlm_max_side', type=int, default=720, help='resize long side before sending to VLM (<=0 to disable)')
-    ap.add_argument('--first_round_apply_all', action='store_true', help='In round 1, apply ALL returned anchors (batch) by generating points for each and updating mask once')
+    ap.add_argument('--first_round_apply_all', action='store_true', default=True, help='In round 1, apply ALL returned anchors (batch) by generating points for each and updating mask once')
     ap.add_argument('--second_round_apply_all', action='store_true', help='In round 2, apply ALL returned anchors (batch) similar to round 1')
     ap.add_argument('--use-api', action='store_true', help='Use Qwen API instead of local model')
     ap.add_argument('--api-key', help='API key for Qwen API (default: from DASHSCOPE_API_KEY env var)')
@@ -602,7 +602,7 @@ def main():
     output_dir = os.path.join(base_dir, 'outputs', 'clean_sculpt', sample_name)
 
     print(f"=== 清理版SAM分割流程 (样本: {sample_name}, 实例: {instance_name}) ===")
-    print("[优化策略] 使用单点优化策略: VLM每次只选择一个最重要的锚点进行精细优化")
+    print("[优化策略] 使用批处理优化策略: 一轮中对所有锚点进行处理")
 
     # 加载数据
     print("加载输入数据...")
@@ -644,12 +644,7 @@ def main():
     # 迭代优化
     max_rounds = int(args.rounds)
 
-    # 最近一次选择与效果，用于重复降权
-    prev_selected_anchor_id: Optional[int] = None
-    prev_change_pixels: Optional[int] = None
-    min_change_threshold = 500  # 小于该像素变化视为收益很小，可考虑替换为次优候选
-    alt_score_margin = 0.05  # 次优分数容忍差距
-    banned_anchor_ids: set[int] = set()  # 本轮及后续轮次禁用的锚点ID
+    # 批处理不需要重复降权逻辑
 
     for round_idx in range(max_rounds):
         print(f"\n=== 第 {round_idx + 1} 轮优化 ===")
@@ -686,76 +681,23 @@ def main():
         anchor_response = vlm.choose_anchors(anchor_vis_vlm, instance_name, global_reason=semantic_reason)
         selected_anchors = anchor_response.get('anchors_to_refine', [])
 
-        # 批处理选项：如果启用，则在指定轮次对返回的全部锚点进行处理（生成象限指令并合并点）
-        is_batch_round = (bool(args.first_round_apply_all) and round_idx == 0) or (bool(getattr(args, 'second_round_apply_all', False)) and round_idx == 1)
-        if is_batch_round:
-            # 过滤非法/重复ID
-            seen = set()
-            batch_anchors = []
-            for it in selected_anchors if isinstance(selected_anchors, list) else []:
-                try:
-                    aid = int(it.get('id', -1))
-                except Exception:
-                    continue
-                if 1 <= aid <= 8 and aid not in seen:
-                    seen.add(aid)
-                    batch_anchors.append(it)
-            if not batch_anchors:
-                print("[WARN] 首轮批处理无有效锚点，使用fallback锚点1")
-                batch_anchors = [{"id": 1, "reason": "fallback for empty batch"}]
-            selected_anchors = batch_anchors
-            print(f"[批处理] 第{round_idx + 1}轮批量执行 {len(selected_anchors)} 个锚点: {[int(a.get('id',-1)) for a in selected_anchors]}")
-        else:
-            # 选择逻辑：
-            # 1) 过滤被禁用ID
-            # 2) 默认使用过滤后列表的第一个（或原列表的第一个）
-            # 3) 若与上一轮相同且上一轮收益很小，则尝试次优候选，并将上一轮ID加入禁用列表（后续永久跳过）
-            chosen_anchor = None
-            if isinstance(selected_anchors, list) and selected_anchors:
-                # 过滤被禁用的候选
-                filtered = []
-                for it in selected_anchors:
-                    try:
-                        aid = int(it.get('id', -1))
-                    except Exception:
-                        aid = -1
-                    if 1 <= aid <= 8 and aid not in banned_anchor_ids:
-                        filtered.append(it)
-                candidates = filtered if filtered else selected_anchors
-
-                chosen_anchor = candidates[0]
-                if prev_selected_anchor_id is not None and prev_change_pixels is not None:
-                    same_as_prev = int(chosen_anchor.get('id', -1)) == int(prev_selected_anchor_id)
-                    if same_as_prev and prev_change_pixels < min_change_threshold and len(candidates) > 1:
-                        # 仅当次优评分不明显更差时才替换
-                        top_score = chosen_anchor.get('score', None)
-                        replaced = False
-                        for alt in candidates[1:]:
-                            alt_id = int(alt.get('id', -1))
-                            if not (1 <= alt_id <= 8):
-                                continue
-                            if alt_id == prev_selected_anchor_id:
-                                continue
-                            alt_score = alt.get('score', None)
-                            if top_score is None or alt_score is None or float(alt_score) >= float(top_score) - alt_score_margin:
-                                print(f"[去重降权] 上一轮锚点{prev_selected_anchor_id}改变量较小({prev_change_pixels}px)，本轮优先改用次优候选锚点{alt_id}，并将{prev_selected_anchor_id}加入禁用列表")
-                                chosen_anchor = alt
-                                banned_anchor_ids.add(int(prev_selected_anchor_id))
-                                replaced = True
-                                break
-                        if not replaced and filtered and filtered[0] != chosen_anchor:
-                            # 若替换失败但有过滤候选，则使用过滤后的首选
-                            chosen_anchor = filtered[0]
-                # 最终仅使用一个锚点进入后续流程
-                selected_anchors = [chosen_anchor]
-            
-            # VLM现在可能返回多个锚点，保持兼容：如果依然为空则fallback
-            if not selected_anchors:
-                print("[WARN] VLM未选择任何锚点，使用fallback策略选择锚点1")
-                print(f"[DEBUG] VLM原始响应: '{anchor_response.get('raw_text', 'N/A')}'")
-                fallback_anchor = {"id": 1, "reason": "fallback selection when VLM returned empty"}
-                selected_anchors = [fallback_anchor]
-                print(f"[INFO] 使用fallback锚点: {selected_anchors}")
+        # 批处理：对返回的全部锚点进行处理（生成象限指令并合并点）
+        # 过滤非法/重复ID
+        seen = set()
+        batch_anchors = []
+        for it in selected_anchors if isinstance(selected_anchors, list) else []:
+            try:
+                aid = int(it.get('id', -1))
+            except Exception:
+                continue
+            if 1 <= aid <= 8 and aid not in seen:
+                seen.add(aid)
+                batch_anchors.append(it)
+        if not batch_anchors:
+            print("[WARN] 批处理无有效锚点，使用fallback锚点1")
+            batch_anchors = [{"id": 1, "reason": "fallback for empty batch"}]
+        selected_anchors = batch_anchors
+        print(f"[批处理] 第{round_idx + 1}轮批量执行 {len(selected_anchors)} 个锚点: {[int(a.get('id',-1)) for a in selected_anchors]}")
 
         # Fallback: if VLM returns no anchors, use a default anchor to keep pipeline going
         if not selected_anchors:
@@ -860,7 +802,7 @@ def main():
                 all_pos_points, all_neg_points, current_mask, square_size,
                 allowed_update_mask=allowed_update_mask,
             )
-            # 记录本轮掩码变化像素数（仅用于下一轮的去重降权判断）
+            # 记录本轮掩码变化像素数
             new_mask_bin = (current_mask > 0).astype(np.uint8)
             change_pixels = int(np.sum(old_mask ^ new_mask_bin))
             print(f"[变化] 本轮掩码改变像素: {change_pixels}")
@@ -873,29 +815,18 @@ def main():
             save_image(os.path.join(output_dir, f'round{round_idx + 1}_step4_refined_mask.png'), current_mask)
             print(f"优化后掩码像素数: {np.sum(current_mask > 0)}")
 
-            # 记录用于下一轮的重复降权信息（本轮实际使用的锚点）
-            if selected_anchors:
-                prev_selected_anchor_id = int(selected_anchors[0].get('id', -1))
-                prev_change_pixels = change_pixels
+            # 批处理模式不需要记录下一轮信息
         else:
             print("未生成任何点，跳过本轮优化")
-            # 若无点生成，则视为变化为0
-            prev_change_pixels = 0
 
     # 保存最终结果
     final_mask_name = f'final_mask.{args.output_format}'
     save_image(os.path.join(output_dir, final_mask_name), current_mask)
 
-    # 保存instance信息到txt文件
+    # 保存instance信息到txt文件（仅包含instance）
     instance_info_path = os.path.join(output_dir, 'instance_info.txt')
     with open(instance_info_path, 'w', encoding='utf-8') as f:
-        f.write(f"Sample: {sample_name}\n")
-        f.write(f"Instance: {instance_name}\n")
-        if semantic_reason:
-            f.write(f"Description: {semantic_reason}\n")
-        f.write(f"Final mask pixels: {np.sum(current_mask > 0)}\n")
-        f.write(f"ROI: ({roi_box.x0:.1f}, {roi_box.y0:.1f}, {roi_box.x1:.1f}, {roi_box.y1:.1f})\n")
-        f.write(f"Processing rounds: {max_rounds}\n")
+        f.write(instance_name)
     
     # 如果启用清理模式，删除中间文件
     if args.clean_output:

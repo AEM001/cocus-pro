@@ -1,0 +1,6 @@
+{
+  "instance": "snake",
+  "reason": "目标是一个伪装的snake，位于自然环境中。需要精确分割出其边界。",
+  "original_id": "000002_snake",
+  "source": "COD10K_TEST_DIR"
+}

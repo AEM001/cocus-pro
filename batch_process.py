@@ -109,12 +109,13 @@ def process_single_image(name: str, image_path: str, args) -> Dict:
         # 设置目标查询
         target_query = args.target or DEFAULT_TARGETS.get(name, f'find the camouflaged object in {name}')
         
-        # 构建基本命令参数 - 修夏conda激活问题
-        base_env = f"export DASHSCOPE_API_KEY='{args.api_key}' && source ~/anaconda3/etc/profile.d/conda.sh && conda activate camo-vlm"
+        # 构建基本命令参数 - 直接使用python路径
+        python_path = "/home/albert/anaconda3/envs/camo-vlm/bin/python"
+        base_env = f"export DASHSCOPE_API_KEY='{args.api_key}'"
         
         # 步骤1：生成网格标注图
         if not args.skip_grid:
-            grid_cmd = f"""{base_env} && cd auxiliary/scripts && python make_region_prompts.py \\
+            grid_cmd = f"""{base_env} && cd auxiliary/scripts && {python_path} make_region_prompts.py \\
                 --name {name} \\
                 --image ../images/{os.path.basename(image_path)} \\
                 --rows {args.grid_size} \\
@@ -128,7 +129,7 @@ def process_single_image(name: str, image_path: str, args) -> Dict:
         
         # 步骤2：API目标检测
         if not args.skip_detection:
-            detection_cmd = f"""{base_env} && cd auxiliary/scripts && python detect_target_api.py \\
+            detection_cmd = f"""{base_env} && cd auxiliary/scripts && {python_path} detect_target_api.py \\
                 --name {name} \\
                 --target "{target_query}" \\
                 --model {args.api_model} \\
@@ -147,7 +148,7 @@ def process_single_image(name: str, image_path: str, args) -> Dict:
         
         # 步骤3：生成SAM输入
         if not args.skip_build:
-            build_cmd = f"""{base_env} && python auxiliary/scripts/build_prior_and_boxes.py \\
+            build_cmd = f"""{base_env} && {python_path} auxiliary/scripts/build_prior_and_boxes.py \\
                 --name {name} \\
                 --meta auxiliary/scripts/out/{name}/{name}_meta.json \\
                 --pred auxiliary/llm_out/{name}_output.json"""
@@ -160,7 +161,7 @@ def process_single_image(name: str, image_path: str, args) -> Dict:
         
         # 步骤4：SAM精修
         if not args.skip_sculpt:
-            sculpt_cmd = f"""{base_env} && python clean_sam_sculpt.py \\
+            sculpt_cmd = f"""{base_env} && {python_path} clean_sam_sculpt.py \\
                 --name {name} \\
                 --rounds {args.rounds} \\
                 --ratio {args.ratio} \\
@@ -286,8 +287,8 @@ def main():
     
     # 处理参数
     parser.add_argument('--grid-size', type=int, default=9, help='网格大小')
-    parser.add_argument('--rounds', type=int, default=4, help='SAM精修轮数')
-    parser.add_argument('--ratio', type=float, default=0.8, help='象限比例')
+    parser.add_argument('--rounds', type=int, default=1, help='SAM精修轮数')
+    parser.add_argument('--ratio', type=float, default=0.6, help='象限比例')
     parser.add_argument('--vlm-max-side', type=int, default=720, help='VLM输入图像最大边长')
     parser.add_argument('--output-format', choices=['png', 'jpg'], default='png', help='输出掩码格式')
     parser.add_argument('--clean-output', action='store_true', help='只保留最终掩码和instance信息')

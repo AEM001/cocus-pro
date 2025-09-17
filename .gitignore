@@ -1,7 +1,8 @@
 # 忽略大文件目录
 checkpoints/
 models/
-
+outputs/
+dataset/
 # 忽略Python缓存文件
 __pycache__/
 *.pyc

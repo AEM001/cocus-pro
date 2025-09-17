@@ -1,0 +1,33 @@
+============================================================
+批量处理报告
+============================================================
+处理时间: 2025-09-17 11:13:17
+总图像数: 4
+成功: 3
+失败: 1
+成功率: 75.0%
+总处理时间: 43.9秒
+平均处理时间: 11.0秒/图像
+
+成功处理的图像:
+----------------------------------------
+✅ dog (16.8s)
+   输出文件: instance_info.txt, final_mask.png
+✅ f (12.5s)
+   输出文件: final_mask.png, instance_info.txt
+✅ q (14.5s)
+   输出文件: instance_info.txt, final_mask.png
+
+失败的图像:
+----------------------------------------
+❌ cat: 目标检测失败: 命令失败: Command 'export DASHSCOPE_API_KEY='sk-a20473de00b94f668cbcd4d2725947b2' && cd auxiliary/scripts && /home/albert/anaconda3/envs/camo-vlm/bin/python detect_target_api.py \
+                --name cat \
+                --target "find the camouflaged cat" \
+                --model qwen-vl-plus-latest \
+                --grid-size 9' returned non-zero exit status 1.
+输出: [ERROR] 网格图像文件不存在:
+  垂直: /home/albert/code/CV/auxiliary/out/cat/cat_vertical_9.png
+  水平: /home/albert/code/CV/auxiliary/out/cat/cat_horizontal_9.png
+请先运行 make_region_prompts.py 生成网格图像
+
+错误: 

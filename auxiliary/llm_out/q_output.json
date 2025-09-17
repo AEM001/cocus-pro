@@ -1,6 +1,12 @@
 {
-  "instance": "blurred person standing in field",
-  "ids_line_vertical": [5, 6],
-  "ids_line_horizontal": [4, 5, 6],
-  "reason": "The question refers to something against the background, which is likely a person standing in the middle of the field. The figure appears blurred and is located near the center of the image. In the vertical segmentation, it spans segments 5 and 6. In the horizontal segmentation, it spans segments 4, 5, and 6, as it extends from the upper-middle to the lower-middle portion of the image."
+  "instance": "camouflaged animal",
+  "ids_line_vertical": [
+    5,
+    6
+  ],
+  "ids_line_horizontal": [
+    6,
+    7
+  ],
+  "reason": "The animal is located in the lower-middle portion of the image, partially obscured by the grass. It blends into the environment due to its coloration and position, making it a camouflaged target."
 }
