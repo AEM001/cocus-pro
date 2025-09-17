@@ -6,24 +6,12 @@ import numpy as np
 
 
 class VLMBase(ABC):
-    """VLM接口，仅支持API模式的anchor/quadrant指导分割优化"""
+    """VLM接口：仅保留直接点提议(propose_points)能力，移除所有锚点/象限相关逻辑"""
 
     @abstractmethod
-    def choose_anchors(self, image_with_anchors_rgb: np.ndarray, instance: str, global_reason: Optional[str] = None) -> Dict[str, Any]:
-        """选择需要精修的锚点
-        
-        Returns:
-            {"anchors_to_refine": [{"id": int, "reason": str}, ...], "raw_text": str}
-        """
-        ...
-
-    @abstractmethod
-    def quadrant_edits(self, quadrant_crop_rgb: np.ndarray, instance: str, anchor_id: int, 
-                      global_reason: Optional[str] = None, anchor_reason: Optional[str] = None) -> Dict[str, Any]:
-        """对象限区域进行编辑分析
-        
-        Returns:
-            {"anchor_id": int, "edits": [{"region_id": 1-2, "action": "pos"|"neg", "why": str}], "raw_text": str}
+    def propose_points(self, context_image_rgb: np.ndarray, instance: str, max_total: int = 10) -> Dict[str, Any]:
+        """基于上下文图让VLM输出精细正/负点（像素坐标）。
+        返回：{"pos_points": [(x,y),...], "neg_points": [(x,y),...], "raw_text": str}
         """
         ...
 

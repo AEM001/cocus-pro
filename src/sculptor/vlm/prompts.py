@@ -1,177 +1,43 @@
 from __future__ import annotations
-from typing import Dict, Optional, List, Union
+from typing import Dict, Optional
 
-SemanticCtx = Dict[str, Union[List[str], str]]
-
-def _fmt_list(xs: Optional[List[str]]) -> str:
-    return ", ".join(xs) if xs else "none"
-
-def build_anchor_prompt(
-    instance: str,
-    global_reason: Optional[str] = None,
-    *,
-    semantic: Optional[SemanticCtx] = None,
-    K: int = 3
-) -> Dict[str, str]:
-    """
-    默认每次只选择一个最重要的锚点，避免多个锚点同时优化导致的复杂性
-    semantic 可包含键：
-      - synonyms, salient_cues, distractors, shape_prior, texture_prior, scene_context, not_target_parts
-    """
-    sem = semantic or {}
+def build_point_prompt(instance: str, image_w: int, image_h: int, *, max_total: int = 10, note: Optional[str] = None) -> Dict[str, str]:
     sys_msg = (
-        "You are a camouflaged-object segmentation assistant. "
-        "Reply with JSON only. No prose, no markdown, no trailing commas. "
-        "The JSON must be valid for Python json.loads."
+        "你是一个伪装目标分割助手。"
+        "请只回复JSON格式，不要其他文字。必须是有效的JSON。"
     )
-
+    n = (note or "").strip()
     user_msg = f"""
-CAMOUFLAGED TARGET: '{instance}'
-This is a CAMOUFLAGED object that naturally blends with its environment. The target may have:
-- Similar colors/textures to the background
-- Irregular, organic shapes that mimic surroundings  
-- Subtle boundaries that are hard to distinguish
-- Parts that appear to "fade into" or "emerge from" the background
+目标：'{instance}'（伪装目标）。绿色半透明覆盖层显示当前分割结果；红色矩形是我们操作的ROI区域。图像尺寸（像素）：宽={image_w}，高={image_h}。
 
-Camouflage analysis context:
-Synonyms/aliases: {_fmt_list(sem.get('synonyms'))}
-Key identifying features: {_fmt_list(sem.get('salient_cues'))}
-Background mimics/distractors: {_fmt_list(sem.get('distractors'))}
-Typical shape: {sem.get('shape_prior') or "unknown"}
-Texture/color patterns: {_fmt_list(sem.get('texture_prior'))}
-Environment: {sem.get('scene_context') or "unknown"}
-Avoid including: {_fmt_list(sem.get('not_target_parts'))}
+--- 先思考（私有的，不要输出） ---
+1）分析当前掩码与真实目标解剖结构和背景干扰物的对比。
+2）识别最需要改进边界的关键区域（添加遗漏部分；移除错误区域）。
+3）确定一组最能指导优化的修正点；如果已经很好，可以较少。
+不要输出或展示这个思考过程。
+--- 思考结束 ---
 
-CURRENT STATE: The green semi-transparent mask shows the current segmentation; its outer edge is the current boundary. The red rectangle is the ROI. Blue dots with white digits 1..8 mark anchor candidates. Use the printed white digit next to each blue dot as the anchor id (1..8). Do NOT infer id from position or ordering.
-TASK: Return up to TOP-{K} anchors, ranked by expected improvement (1 = best). Each candidate is the MOST CRITICAL boundary correction point you can find for the camouflaged {instance}.
+目标：在一次优化步骤中提出精确的修正点来改进掩码。
+- 正点（pos）：位于真实目标内部（用于添加/保留）。关注解剖连续性、有机纹理和连贯的身体部位。
+- 负点（neg）：位于背景泄漏区域（用于移除）。放置在侵入掩码的相似干扰物上（植物、石头、装备等）。
 
-CRITICAL ANALYSIS: Focus on the RELATIONSHIP between {instance} and background:
-- OBJECT vs BACKGROUND: Does the current boundary correctly separate the {instance} from its environment?
-- CAMOUFLAGE PATTERNS: The {instance} may share similar colors/textures with background but has distinct biological structure
-- NATURAL BOUNDARIES: Look for anatomical edges (body outline, fins, limbs) rather than just color changes
-- TEXTURE COHERENCE: {instance} body parts should have consistent organic texture, while background shows environmental patterns
+输出要求（严格的JSON格式；不要markdown代码块）：
+{{{{
+  \"pos_points\": [{{{{\"point_2d\": [x, y], \"why\": \"简短说明\"}}}}...],
+  \"neg_points\": [{{{{\"point_2d\": [x, y], \"why\": \"简短说明\"}}}}...]
+}}}}
 
-PRIORITY STRATEGY - Choose the anchor with MAXIMUM BIOLOGICAL SIGNIFICANCE:
-1) ANATOMICAL BOUNDARIES: Prefer anchors where {instance} body structure meets background (not just color transitions)
-2) STRUCTURAL CONTINUITY: Select points that will restore natural {instance} body shape and proportions
-3) CAMOUFLAGE vs REALITY: Distinguish between background mimicry and actual {instance} body parts
-4) FUNCTIONAL ANATOMY: Prioritize biologically important features (head, main body, appendages)
+点位放置策略（内部指导，不要输出）：
+- 密度：优先在错误或不确定的边界段进行密集采样；沿着细长的过渡区域放置多个点以稳健地引导轮廓。
+- 分布：覆盖不同的错误区域；避免重复重叠，同时确保轮廓附近的连续覆盖。
+- 覆盖：沿着头部、躯干、尾部/附肢等可见轮廓采样正点；在最显著的泄漏处放置负点。
+- 生物学优先：优先考虑结构线索（形状连续性、鳍/附肢）而非仅基于颜色的相似性。
+- 鲁棒性：避开图像边界；避免重叠点；确保坐标有效。
 
-For CAMOUFLAGED {instance}, distinguish:
-- REAL {instance} PARTS: Organic textures, natural body curves, anatomical consistency
-- BACKGROUND ELEMENTS: Environmental patterns, random textures, non-biological shapes
-- TRANSITION ZONES: Where {instance} naturally meets its habitat
-
-Decision criteria (DO NOT OUTPUT):
-- ANATOMICAL LEAK: Mask incorrectly includes background elements that mimic {instance} but lack biological structure
-- BIOLOGICAL MISS: Actual {instance} body parts are excluded, breaking anatomical continuity
-- STRUCTURAL ANALYSIS: Prioritize natural {instance} body shape over superficial color similarities
-- HABITAT INTEGRATION: Consider how {instance} naturally interacts with its environment
-- ORGANIC vs INORGANIC: Distinguish living tissue patterns from environmental textures
-- EVALUATE ALL ANCHORS: Compare all 8 anchors and internally score how much IoU improvement each could bring; choose the one with the largest expected improvement
-- TIE-BREAKERS: Prefer longer contiguous boundary errors over tiny local nicks; if two are similar, choose the one that corrects a larger visible area; avoid repeatedly picking the same anchor if the boundary there already looks correct
-- REASON STYLE: Do not copy example wording; write a short, image-specific reason; avoid the phrase missing fin edge continuity
-
-Return JSON STRICTLY:
-{{
-  "anchors_to_refine": [
-    {{ "id": 1-8, "intent": "fix_leak" | "recover_miss", "reason": "short justification (no numbers)", "score": 0.0-1.0 }}
-  ]
-}}
-Constraints:
-- 1 <= len(anchors_to_refine) <= {K}; return at most {K} ranked anchors (index order = rank, best first)
-- Use only ids from 1..8
-- Include optional numeric "score" in [0,1] representing your internal confidence of expected improvement; higher is better
-- Keep justifications short; no lists or numbering; no quotes in the text
-- Choose the MOST IMPORTANT anchors, not just any suitable ones
-- Do NOT rely on scene-specific or image-specific cues; use generic terms (e.g., body edge, appendage, background texture)
-
-Few-shot examples (DO NOT COPY, DO NOT ECHO; FORMAT ONLY):
-Input→ (two strong issues: anchor 3 background leak, anchor 2 missing body edge)
-Output→ {{"anchors_to_refine":[{{"id":3,"intent":"fix_leak","reason":"background texture intrudes","score":0.82}},{{"id":2,"intent":"recover_miss","reason":"excluded body edge","score":0.78}}]}}
+约束条件：
+- 优先提供尽可能多有意义的点，最多{max_total}个（正负点总和）。如果不确定，倾向于提供更多点；只有在边界看起来正确时才使用较少的点。
+- 仅使用像素坐标（整数）：0 <= x < {image_w}, 0 <= y < {image_h}
+- 保持\"why\"简短（<=15个字）；不要列表；不要编号；不要额外的键
+{('额外说明：' + n) if n else ''}
 """
-    # 可选：把 global_reason 作为“全局上下文”补充
-    if global_reason:
-        user_msg = "Global context: " + global_reason.strip() + "\n\n" + user_msg
-
-    return {"system": sys_msg, "user": user_msg}
-
-
-def build_quadrant_prompt(
-    instance: str,
-    anchor_id: int,
-    global_reason: Optional[str] = None,
-    *,
-    semantic: Optional[SemanticCtx] = None,
-    anchor_hint: Optional[str] = None,
-    max_pos: int = 1,
-    max_neg: int = 1
-) -> Dict[str, str]:
-    """
-    基于切线内外区域的提示词构建。
-    """
-    sem = semantic or {}
-    sys_msg = (
-        "You are a camouflaged-object segmentation assistant. "
-        "Reply with JSON only. No extra text. Valid JSON required."
-    )
-
-    user_msg = f"""
-CAMOUFLAGED TARGET: '{instance}'
-Key features: {_fmt_list(sem.get('salient_cues'))}
-Background mimics: {_fmt_list(sem.get('distractors'))}
-Avoid: {_fmt_list(sem.get('not_target_parts'))}
-
-Focus on anchor {anchor_id}. The green mask indicates the current {instance} segmentation. The square region is divided by the current boundary into:
-- Region 1 (Inner): Toward the {instance} body/interior
-- Region 2 (Outer): Toward the background/environment
-
-For CAMOUFLAGED {instance}, analyze the BIOLOGICAL REALITY:
-- ANATOMICAL STRUCTURE: Does this region show natural {instance} body organization?
-- ORGANIC PATTERNS: Distinguish living tissue textures from environmental mimicry
-- FUNCTIONAL ANATOMY: Consider {instance} body proportions and natural shape
-- HABITAT RELATIONSHIP: How does the {instance} naturally interface with its environment?
-
-Decision logic (DO NOT OUTPUT):
-- POS: This region contains ACTUAL {instance} anatomy (organic structure, not just similar colors)
-- NEG: This region shows background/habitat that may mimic {instance} but lacks biological structure
-- BIOLOGICAL PRIMACY: Trust anatomical evidence over superficial visual similarities
-- Inner regions: POS if shows {instance} internal body structure; NEG if background intrusion
-- Outer regions: NEG if environmental elements; POS if natural {instance} body extension
-- KEY QUESTION: Is this part of the living {instance} organism or just environmental mimicry?
-
-Return JSON STRICTLY:
-{{{{
-  "anchor_id": {anchor_id},
-  "edits": [
-    {{{{ "region_id": 1 | 2, "action": "pos" | "neg", "why": "short justification" }}}}
-  ]
-}}}}
-Constraints:
-- len(edits) == 1 (exactly one region selection)
-- region_id must be 1 (inner) or 2 (outer)
-- action must be "pos" or "neg"
-- Keep 'why' brief and descriptive
-
-Few-shot examples (DO NOT COPY):
-{{{{
-  "anchor_id": 3,
-  "edits": [
-    {{{{ "region_id": 2, "action": "neg", "why": "background texture leak" }}}}
-  ]
-}}}}
-
-{{{{
-  "anchor_id": 5,
-  "edits": [
-    {{{{ "region_id": 1, "action": "pos", "why": "body texture continues inward" }}}}
-  ]
-}}}}
-"""
-    # 可选：附加来自上一轮 anchor 决策的线索
-    if anchor_hint:
-        user_msg = f"Anchor hint: {anchor_hint.strip()}\n\n" + user_msg
-    if global_reason:
-        user_msg = "Global context: " + global_reason.strip() + "\n\n" + user_msg
-
     return {"system": sys_msg, "user": user_msg}

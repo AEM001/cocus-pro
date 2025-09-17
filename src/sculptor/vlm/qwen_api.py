@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image
 
 from .base import VLMBase, try_parse_json
-from .prompts import build_anchor_prompt, build_quadrant_prompt
+from .prompts import build_point_prompt
 
 
 class QwenAPIVLM(VLMBase):
@@ -40,21 +40,19 @@ class QwenAPIVLM(VLMBase):
         初始化API客户端
         
         Args:
-            api_key: API密钥，如果为None则从环境变量DASHSCOPE_API_KEY读取
+            api_key: API密钥（推荐通过环境变量/文件加载，不要硬编码）
             model_name: 模型名称，支持 qwen-vl-plus-latest, qwen-vl-max-latest 等
             use_dashscope: 是否使用DashScope SDK (推荐)，否则使用OpenAI兼容模式
             high_resolution: 是否开启高分辨率模式 (仅DashScope SDK支持)
             max_tokens: 最大生成token数
             temperature: 生成温度
         """
-        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
-        if not self.api_key:
-            raise ValueError("API Key is required. Set DASHSCOPE_API_KEY environment variable or pass api_key parameter")
-            
+        self.api_key = "sk-a20473de00b94f668cbcd4d2725947b2"
+        
         self.model_name = model_name
         self.use_dashscope = use_dashscope
         self.high_resolution = high_resolution
-        self.max_tokens = max(max_tokens, 512)  # 确保至少256 tokens
+        self.max_tokens = max(max_tokens, 512)  # 至少512 tokens
         self.temperature = temperature
         
         self._client = None
@@ -84,77 +82,111 @@ class QwenAPIVLM(VLMBase):
             except ImportError:
                 raise ImportError("OpenAI SDK not installed. Run: pip install openai")
 
-    def choose_anchors(self, image_with_anchors_rgb: np.ndarray, instance: str, global_reason: Optional[str] = None) -> Dict[str, Any]:
-        """选择锚点的API调用"""
-        # 构建语义上下文
-        semantic_context = None
-        if global_reason:
-            semantic_context = {
-                'salient_cues': [f'{instance} anatomical features', 'natural body contours', 'organic textures'],
-                'distractors': ['background camouflage patterns', 'environmental mimicry', 'habitat elements'],
-                'shape_prior': f'natural {instance} body structure and proportions',
-                'scene_context': f'{instance} in natural camouflaged habitat'
-            }
-        
-        prompts = build_anchor_prompt(instance, global_reason, semantic=semantic_context)
-        text = self._inference([image_with_anchors_rgb], prompts["system"], prompts["user"])
-        
-        # DEBUG: Print raw VLM response
-        print(f"[DEBUG] Raw VLM anchor response: '{text}'")
-        print(f"[DEBUG] Response length: {len(text)} chars")
-        
-        data = try_parse_json(text)
-        anchors = data.get("anchors_to_refine", [])
 
-        # 标准化锚点数据
-        norm = self._normalize_anchors(anchors)
-        
-        # 如果解析失败，尝试修复
-        if not norm:
-            norm = self._salvage_anchors_from_text(text)
-        
-        print(f"[DEBUG] Final anchors count: {len(norm)}")
-        
-        # 返回标准格式
-        result = {"anchors_to_refine": norm, "raw_text": text}
-        return self._validate_anchor_response(result)
-
-    def quadrant_edits(self, quadrant_crop_rgb: np.ndarray, instance: str, anchor_id: int, 
-                      global_reason: Optional[str] = None, anchor_reason: Optional[str] = None) -> Dict[str, Any]:
-        """象限编辑的API调用"""
-        # 构建语义上下文
-        semantic_context = None
-        if global_reason:
-            semantic_context = {
-                'salient_cues': [f'{instance} anatomical structures', 'biological boundaries', 'organic patterns'],
-                'distractors': ['environmental textures', 'background camouflage', 'habitat patterns'],
-                'shape_prior': f'natural {instance} anatomy and form',
-                'scene_context': f'{instance} blending with natural habitat'
-            }
-        
-        prompts = build_quadrant_prompt(instance, anchor_id, global_reason, 
-                                       semantic=semantic_context, anchor_hint=anchor_reason)
-        text = self._inference([quadrant_crop_rgb], prompts["system"], prompts["user"])
-        
-        # DEBUG: Print raw VLM response
-        print(f"[DEBUG] Raw VLM quadrant response for anchor {anchor_id}: '{text}'")
-        print(f"[DEBUG] Response length: {len(text)} chars")
-        
+    def propose_points(self, context_image_rgb: np.ndarray, instance: str, max_total: int = 10) -> Dict[str, Any]:
+        """直接基于上下文图（叠加当前mask与ROI）让VLM输出正/负点。
+        返回：{"pos_points": [(x,y),...], "neg_points": [(x,y),...], "raw_text": str}
+        坐标以像素为单位，参照传入的 context_image_rgb 尺寸。
+        为避免缩放引入的坐标歧义，提示词要求输出归一化坐标 xy_norm ∈ [0,1]，本函数再映射回像素。
+        """
+        H, W = int(context_image_rgb.shape[0]), int(context_image_rgb.shape[1])
+        prompts = build_point_prompt(instance, W, H, max_total=max_total)
+        text = self._inference([context_image_rgb], prompts["system"], prompts["user"])
+        print(f"[DEBUG] Raw VLM points response: '{text}'")
+        # Strip markdown fences if any
         data = try_parse_json(text)
-        edits = data.get("edits", [])
-        
-        # 标准化编辑指令
-        norm = self._normalize_edits(edits)
-        
-        # 如果解析失败，尝试修复
-        if not norm:
-            norm = self._salvage_edits_from_text(text, anchor_id)
-        
-        print(f"[DEBUG] Final edits count for anchor {anchor_id}: {len(norm)}")
-        
-        # 返回标准格式
-        result = {"anchor_id": int(anchor_id), "edits": norm, "raw_text": text}
-        return self._validate_edit_response(result)
+        if not data:
+            # 尝试修复截断的JSON
+            try:
+                fixed = self._fix_truncated_json(text)
+                data = json.loads(fixed) if fixed and fixed != "{}" else {}
+            except Exception:
+                data = {}
+        # Support two formats: separate lists, or combined "points" with type
+        pos_items = data.get("pos_points", []) if isinstance(data, dict) else []
+        neg_items = data.get("neg_points", []) if isinstance(data, dict) else []
+        if not pos_items and not neg_items and isinstance(data, dict) and "points" in data:
+            pts_combined = data.get("points", [])
+            for it in pts_combined:
+                if isinstance(it, dict) and it.get("type") in ("pos", "neg"):
+                    if it["type"] == "pos":
+                        pos_items.append(it)
+                    else:
+                        neg_items.append(it)
+        pos_pts = self._extract_points(pos_items, W, H)
+        neg_pts = self._extract_points(neg_items, W, H)
+        # Respect VLM output: do not force count; return as is
+        return {"pos_points": pos_pts, "neg_points": neg_pts, "raw_text": text}
+
+    def _extract_points(self, items: List[Any], W: int, H: int) -> List[tuple[int,int]]:
+        pts: List[tuple[int,int]] = []
+        if not isinstance(items, (list, tuple)):
+            return pts
+        for it in items:
+            try:
+                x = y = None
+                if isinstance(it, dict):
+                    # Prefer pixel coordinates first
+                    if "point_2d" in it and isinstance(it["point_2d"], (list, tuple)) and len(it["point_2d"]) == 2:
+                        xp, yp = float(it["point_2d"][0]), float(it["point_2d"][1])
+                        x = int(round(xp))
+                        y = int(round(yp))
+                    elif ("x" in it and "y" in it):
+                        x = int(round(float(it["x"])))
+                        y = int(round(float(it["y"])))
+                    elif "xy_norm" in it and isinstance(it["xy_norm"], (list, tuple)) and len(it["xy_norm"]) == 2:
+                        xn, yn = float(it["xy_norm"][0]), float(it["xy_norm"][1])
+                        x = int(round(max(0.0, min(1.0, xn)) * (W - 1)))
+                        y = int(round(max(0.0, min(1.0, yn)) * (H - 1)))
+                    elif ("x_norm" in it and "y_norm" in it):
+                        xn, yn = float(it["x_norm"]), float(it["y_norm"])
+                        x = int(round(max(0.0, min(1.0, xn)) * (W - 1)))
+                        y = int(round(max(0.0, min(1.0, yn)) * (H - 1)))
+                if x is None or y is None:
+                    continue
+                x = max(0, min(W - 1, x))
+                y = max(0, min(H - 1, y))
+                if (x, y) not in pts:
+                    pts.append((x, y))
+            except Exception:
+                continue
+        return pts
+
+        """If fewer than target points are returned, densify by jittering around existing points.
+        Preference order: densify positives first, then negatives. Ensure uniqueness and image bounds.
+        """
+        pos_set = list(pos)
+        neg_set = list(neg)
+        offsets = [(dx,dy) for dx in (-3,-2,-1,1,2,3) for dy in (-3,-2,-1,1,2,3)]
+        i = 0
+        while len(pos_set) + len(neg_set) < target and (pos_set or neg_set):
+            src_list = pos_set if pos_set else neg_set
+            base = src_list[i % len(src_list)]
+            jittered = False
+            for dx, dy in offsets:
+                nx = max(0, min(W - 1, base[0] + dx))
+                ny = max(0, min(H - 1, base[1] + dy))
+                if (nx, ny) not in pos_set and (nx, ny) not in neg_set:
+                    if src_list is pos_set:
+                        pos_set.append((nx, ny))
+                    else:
+                        neg_set.append((nx, ny))
+                    jittered = True
+                    break
+            i += 1
+            if not jittered and i > (len(pos_set)+len(neg_set))*len(offsets):
+                break
+        # Trim if overshoot
+        total = len(pos_set) + len(neg_set)
+        if total > target:
+            cut = total - target
+            if cut <= len(neg_set):
+                neg_set = neg_set[:-cut]
+            else:
+                cut2 = cut - len(neg_set)
+                neg_set = []
+                pos_set = pos_set[:-cut2] if cut2 < len(pos_set) else pos_set[:1]
+        return pos_set, neg_set
 
     def _inference(self, images: List[np.ndarray], system: str, user: str) -> str:
         """执行API推理"""
@@ -279,94 +311,9 @@ class QwenAPIVLM(VLMBase):
         
         return img_b64
 
-    def _normalize_anchors(self, anchors) -> List[dict]:
-        """标准化锚点响应"""
-        norm = []
-        for it in anchors if isinstance(anchors, (list, tuple)) else []:
-            try:
-                aid = int(it.get("id", 0))
-                rsn = str(it.get("reason", ""))
-                sc = it.get("score", None)
-                try:
-                    sc = float(sc) if sc is not None else None
-                except Exception:
-                    sc = None
-                
-                anchor_dict = {"id": aid, "reason": rsn}
-                if sc is not None:
-                    anchor_dict["score"] = sc
-                norm.append(anchor_dict)
-            except Exception:
-                continue
-        
-        # 如果有分数，按分数降序排列
-        if norm and any("score" in a for a in norm):
-            norm = sorted(norm, key=lambda x: -(x.get("score", -1.0)))
-        
-        return norm
 
-    def _normalize_edits(self, edits) -> List[dict]:
-        """标准化编辑指令"""
-        norm = []
-        for it in edits if isinstance(edits, (list, tuple)) else []:
-            try:
-                rid = int(it.get("region_id", 0))
-                act = str(it.get("action", ""))
-                why = str(it.get("why", ""))
-                if rid in (1, 2, 3, 4) and act in ("pos", "neg"):
-                    norm.append({"region_id": rid, "action": act, "why": why})
-            except Exception:
-                continue
-        return norm
 
-    def _salvage_anchors_from_text(self, text: str) -> List[dict]:
-        """从文本中抢救锚点信息"""
-        import re
-        
-        norm = []
-        # 尝试修复截断的JSON
-        fixed_text = self._fix_truncated_json(text)
-        if fixed_text != text:
-            try:
-                data = json.loads(fixed_text)
-                anchors = data.get("anchors_to_refine", [])
-                norm = self._normalize_anchors(anchors)
-                if norm:
-                    print(f"[DEBUG] Fixed and parsed {len(norm)} anchors from truncated JSON")
-                    return norm
-            except Exception as e:
-                print(f"[DEBUG] JSON fix attempt failed: {e}")
-        
-        # 正则表达式抢救
-        m = re.search(r"anchors\s*_?to\s*_?refine\s*:\s*(\[.*?\])", text, re.IGNORECASE | re.DOTALL)
-        if m:
-            try:
-                sub = m.group(1)
-                parsed = json.loads(sub)
-                if isinstance(parsed, list):
-                    norm = self._normalize_anchors(parsed)
-                    print(f"[DEBUG] Salvaged {len(norm)} anchors from regex pattern")
-            except Exception as e:
-                print(f"[DEBUG] Regex salvage failed: {e}")
-        
-        return norm
 
-    def _salvage_edits_from_text(self, text: str, anchor_id: int) -> List[dict]:
-        """从文本中抢救编辑信息"""
-        norm = []
-        # 尝试修复截断的JSON
-        fixed_text = self._fix_truncated_json(text)
-        if fixed_text != text:
-            try:
-                data = json.loads(fixed_text)
-                edits = data.get("edits", [])
-                norm = self._normalize_edits(edits)
-                if norm:
-                    print(f"[DEBUG] Fixed and parsed {len(norm)} edits from truncated JSON for anchor {anchor_id}")
-            except Exception as e:
-                print(f"[DEBUG] JSON fix attempt failed for anchor {anchor_id}: {e}")
-        
-        return norm
 
     def _fix_truncated_json(self, text: str) -> str:
         """尝试修复截断的JSON"""
